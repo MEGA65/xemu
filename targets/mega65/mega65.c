@@ -891,7 +891,12 @@ void write_phys_mem ( int addr, Uint8 data )
 			hypervisor_memory[addr & 0x3FFF] = data;
 		return;
 	}
-	FATAL("Unhandled memory write operation for linear address $%X data = $%02X (PC=$%04X)" NL, addr, data, cpu_pc);
+	if (emucfg_get_bool("nofatal"))
+		DEBUG("Unhandled memory write operation for linear address $%X data = $%02X (PC=$%04X)" NL, addr, data, cpu_pc);
+	else
+		FATAL("Unhandled memory write operation for linear address $%X data = $%02X (PC=$%04X)" NL, addr, data, cpu_pc);
+
+
 #if 0
 	addr &= 0xFFFFFFF;	// warps around at 256Mbyte, for address bus of Mega65
 	// !!!! The following line was for C65 to make it secure, only access 1Mbyte of memory ...
@@ -959,7 +964,12 @@ Uint8 read_phys_mem ( int addr )
 		else
 			return 0xFF;	// hypervisor memory is unavailable from "user mode", FIXME: do we need to do trap/whatever if someone tries this?
 	}
-	FATAL("Unhandled memory read operation for linear address $%X (PC=$%04X)" NL, addr, cpu_pc);
+	if (emucfg_get_bool("nofatal"))
+		DEBUG("Unhandled memory read operation for linear address $%X (PC=$%04X)" NL, addr, cpu_pc);
+	else
+		FATAL("Unhandled memory read operation for linear address $%X (PC=$%04X)" NL, addr, cpu_pc);
+
+	return 0xFF; // the default return code
 }
 
 
@@ -1185,6 +1195,7 @@ int main ( int argc, char **argv )
 	emucfg_define_str_option("kickup", KICKSTART_NAME, "Override path of external KickStart to be used");
 	emucfg_define_str_option("kickuplist", NULL, "Set path of symbol list file for external KickStart");
 	emucfg_define_str_option("sdimg", SDCARD_NAME, "Override path of SD-image to be used");
+	emucfg_define_switch_option("nofatal", "Downgrade FATAL errors to DEBUG warnings, in *_phys_mem() function calls");
 #ifdef XEMU_SNAPSHOT_SUPPORT
 	emucfg_define_str_option("snapload", NULL, "Load a snapshot from the given file");
 	emucfg_define_str_option("snapsave", NULL, "Save a snapshot into the given file before Xemu would exit");
