@@ -1,7 +1,7 @@
 /* Xemu - Somewhat lame emulation (running on Linux/Unix/Windows/OSX, utilizing
    SDL2) of some 8 bit machines, including the Commodore LCD and Commodore 65
    and some Mega-65 features as well.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -41,6 +41,7 @@ SDL_PixelFormat *sdl_pix_fmt;
 static const char default_window_title[] = "XEMU";
 char *sdl_window_title = (char*)default_window_title;
 char *window_title_custom_addon = NULL;
+char *window_title_info_addon = NULL;
 Uint32 *sdl_pixel_buffer = NULL;
 int texture_x_size_in_bytes;
 int emu_is_fullscreen = 0;
@@ -61,11 +62,41 @@ FILE *debug_fp = NULL;
 static int osd_enabled = 0, osd_status = 0, osd_available = 0, osd_xsize, osd_ysize, osd_fade_dec, osd_fade_end, osd_alpha_last;
 static Uint32 osd_colours[16], *osd_pixels = NULL, osd_colour_fg, osd_colour_bg;
 static SDL_Texture *sdl_osdtex = NULL;
+static SDL_bool grabbed_mouse = SDL_FALSE, grabbed_mouse_saved = SDL_FALSE;
 
 
 #if !SDL_VERSION_ATLEAST(2, 0, 4)
 #error "At least SDL version 2.0.4 is needed!"
 #endif
+
+
+void set_mouse_grab ( SDL_bool state )
+{
+	if (state != grabbed_mouse) {
+		grabbed_mouse = state;
+		SDL_SetRelativeMouseMode(state);
+		SDL_SetWindowGrab(sdl_win, state);
+	}
+}
+
+
+SDL_bool is_mouse_grab ( void )
+{
+	return grabbed_mouse;
+}
+
+
+void save_mouse_grab ( void )
+{
+	grabbed_mouse_saved = grabbed_mouse;
+	set_mouse_grab(SDL_FALSE);
+}
+
+
+void restore_mouse_grab ( void )
+{
+	set_mouse_grab(grabbed_mouse_saved);
+}
 
 
 static inline int get_elapsed_time ( Uint64 t_old, Uint64 *t_new, time_t *store_unix_time )
@@ -330,9 +361,10 @@ void emu_timekeeping_delay ( int td_em )
 	td = get_elapsed_time(et_new, &et_old, &unix_time);
 	seconds_timer_trigger = (unix_time != old_unix_time);
 	if (seconds_timer_trigger) {
-		snprintf(window_title_buffer_end, 32, "  [%d%%] %s",
+		snprintf(window_title_buffer_end, 32, "  [%d%%] %s %s",
 			td_em_ALL ? (td_pc_ALL * 100 / td_em_ALL) : -1,
-			window_title_custom_addon ? window_title_custom_addon : "running"
+			window_title_custom_addon ? window_title_custom_addon : "running",
+			window_title_info_addon ? window_title_info_addon : ""
 		);
 		SDL_SetWindowTitle(sdl_win, window_title_buffer);
 		td_pc_ALL = td_pc;
@@ -612,6 +644,7 @@ void emu_update_screen ( void )
 		if (osd_status < OSD_STATIC)
 			osd_status -= osd_fade_dec;
 		if (osd_status <= osd_fade_end) {
+			DEBUG("OSD: end of fade at %d" NL, osd_status);
 			osd_status = 0;
 			osd_alpha_last = 0;
 		} else {
@@ -629,15 +662,19 @@ void emu_update_screen ( void )
 
 void osd_clear ( void )
 {
-	if (osd_enabled)
+	if (osd_enabled) {
+		DEBUG("OSD: osd_clear() called." NL);
 		memset(osd_pixels, 0, osd_xsize * osd_ysize * 4);
+	}
 }
 
 
 void osd_update ()
 {
-	if (osd_enabled)
+	if (osd_enabled) {
+		DEBUG("OSD: osd_update() called." NL);
                 SDL_UpdateTexture(sdl_osdtex, NULL, osd_pixels, osd_xsize * sizeof (Uint32));
+	}
 }
 
 
@@ -678,6 +715,7 @@ int osd_init ( int xsize, int ysize, const Uint8 *palette, int palette_entries, 
 	osd_clear();
 	osd_update();
 	osd_set_colours(1, 0);
+	DEBUG("OSD: init: %dx%d pixels, %d palette entries, %d fade_dec, %d fade_end" NL, xsize, ysize, palette_entries, fade_dec, fade_end);
 	return 0;
 }
 
@@ -690,11 +728,11 @@ int osd_init_with_defaults ( void )
 		0xFF,0xFF,0xFF,0xFF	// white
 	};
 	return osd_init(
-		400, 20,
+		OSD_TEXTURE_X_SIZE, OSD_TEXTURE_Y_SIZE,
 		palette,
 		sizeof(palette) >> 2,
-		2,
-		0x20
+		OSD_FADE_DEC_VAL,
+		OSD_FADE_END_VAL
 	);
 }
 
@@ -704,6 +742,7 @@ void osd_on ( int value )
 	if (osd_enabled) {
 		osd_alpha_last = 0;	// force alphamod to set on next screen update
 		osd_status = value;
+		DEBUG("OSD: osd_on(%d) called." NL, value);
 	}
 }
 
@@ -711,6 +750,7 @@ void osd_on ( int value )
 void osd_off ( void )
 {
 	osd_status = 0;
+	DEBUG("OSD: osd_off() called." NL);
 }
 
 
@@ -719,6 +759,7 @@ void osd_global_enable ( int status )
 	osd_enabled = (status && osd_available);
 	osd_alpha_last = -1;
 	osd_status = 0;
+	DEBUG("OSD: osd_global_enable(%d), result of status = %d" NL, status, osd_enabled);
 }
 
 
@@ -726,6 +767,7 @@ void osd_set_colours ( int fg_index, int bg_index )
 {
 	osd_colour_fg = osd_colours[fg_index];
 	osd_colour_bg = osd_colours[bg_index];
+	DEBUG("OSD: osd_set_colours(%d,%d) called." NL, fg_index, bg_index);
 }
 
 
@@ -733,14 +775,22 @@ void osd_write_char ( int x, int y, char ch )
 {
 	int row;
 	const Uint16 *s;
+	int warn = 1;
 	Uint32 *d = osd_pixels + y * osd_xsize + x;
-	if (ch < 32 || (unsigned char)ch > 128)
+	Uint32 *e = osd_pixels + osd_xsize * osd_ysize;
+	if ((signed char)ch < 32)	// also for >127 chars, since they're negative in 2-complements 8 bit type
 		ch = '?';
 	s = font_16x16 + (((unsigned char)ch - 32) << 4);
 	for (row = 0; row < 16; row++) {
 		Uint16 mask = 0x8000;
 		do {
-			*(d++) = *s & mask ? osd_colour_fg : osd_colour_bg;
+			if (likely(d >= osd_pixels && d < e))
+				*d = *s & mask ? osd_colour_fg : osd_colour_bg;
+			else if (warn) {
+				warn = 0;
+				DEBUG("OSD: ERROR: out of OSD dimensions for char %c at starting point %d:%d" NL, ch, x, y);
+			}
+			d++;
 			mask >>= 1;
 		} while (mask);
 		s++;
@@ -751,10 +801,23 @@ void osd_write_char ( int x, int y, char ch )
 
 void osd_write_string ( int x, int y, const char *s )
 {
-	while (*s) {
-		osd_write_char(x, y, *s);
-		s++;
-		x += 16;
+	if (y < 0)	// negative y: standard place for misc. notifications
+		y = osd_ysize / 2;
+	for (;;) {
+		int len = 0, xt;
+		if (!*s)
+			break;
+		while (s[len] && s[len] != '\n')
+			len++;
+		xt = (x < 0) ? ((osd_xsize - len * 16) / 2) : x;	// request for centered? (if x < 0)
+		while (len--) {
+			osd_write_char(xt, y, *s);
+			s++;
+			xt += 16;
+		}
+		y += 16;
+		if (*s == '\n')
+			s++;
 	}
 }
 
@@ -801,10 +864,12 @@ int _sdl_emu_secured_modal_box_ ( const char *items_in, const char *msg )
 		*p = 0;
 		items = p + 1;
 	}
+	save_mouse_grab();
 	SDL_ShowMessageBox(&messageboxdata, &buttonid);
 	clear_emu_events();
 	emu_drop_events();
 	SDL_RaiseWindow(sdl_win);
+	restore_mouse_grab();
 	emu_timekeeping_start();
 	return buttonid;
 }

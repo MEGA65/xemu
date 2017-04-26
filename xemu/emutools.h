@@ -1,7 +1,7 @@
 /* Xemu - Somewhat lame emulation (running on Linux/Unix/Windows/OSX, utilizing
    SDL2) of some 8 bit machines, including the Commodore LCD and Commodore 65
    and some Mega-65 features as well.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
    The goal of emutools.c is to provide a relative simple solution
    for relative simple emulators using SDL2.
@@ -44,16 +44,23 @@ extern void clear_emu_events ( void );
 
 extern void emu_drop_events ( void );
 
+extern void set_mouse_grab ( SDL_bool state );
+extern SDL_bool is_mouse_grab ( void );
+extern void save_mouse_grab ( void );
+extern void restore_mouse_grab ( void );
+
 #define _REPORT_WINDOW_(sdlflag, str, ...) do { \
 	char _buf_for_win_msg_[4096]; \
 	snprintf(_buf_for_win_msg_, sizeof _buf_for_win_msg_, __VA_ARGS__); \
 	fprintf(stderr, str ": %s" NL, _buf_for_win_msg_); \
 	if (debug_fp)	\
 		fprintf(debug_fp, str ": %s" NL, _buf_for_win_msg_);	\
+	save_mouse_grab(); \
 	MSG_POPUP_WINDOW(sdlflag, sdl_window_title, _buf_for_win_msg_, sdl_win); \
 	clear_emu_events(); \
 	emu_drop_events(); \
 	SDL_RaiseWindow(sdl_win); \
+	restore_mouse_grab(); \
 	emu_timekeeping_start(); \
 } while (0)
 
@@ -71,6 +78,7 @@ extern int _sdl_emu_secured_modal_box_ ( const char *items_in, const char *msg )
 
 extern char *sdl_window_title;
 extern char *window_title_custom_addon;
+extern char *window_title_info_addon;
 extern SDL_Window   *sdl_win;
 extern Uint32 sdl_winid;
 extern SDL_PixelFormat *sdl_pix_fmt;
@@ -129,6 +137,21 @@ extern void osd_set_colours ( int fg_index, int bg_index );
 extern void osd_write_char ( int x, int y, char ch );
 extern void osd_write_string ( int x, int y, const char *s );
 
-#define OSD_STATIC 0x1000
+#define OSD_STATIC		0x1000
+#define OSD_FADE_START		300
+#define OSD_FADE_DEC_VAL	5
+#define OSD_FADE_END_VAL	0x20
+
+#define OSD_TEXTURE_X_SIZE	640
+#define OSD_TEXTURE_Y_SIZE	200
+
+
+#define OSD(x, y, ...) do { \
+	osd_clear(); \
+	osd_write_string(x, y, __VA_ARGS__); \
+	osd_update(); \
+	osd_on(OSD_FADE_START); \
+} while(0)
+
 
 #endif

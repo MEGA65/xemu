@@ -1,5 +1,5 @@
 /* Very primitive emulator of Commodore 65 + sub-set (!!) of Mega65 fetures.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -31,7 +31,6 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 #define UARTMON_SOCKET		"uart.sock"
 
-
 /* Do *NOT* modify these, as other parts of the emulator currently depends on these values ...
    You can try RENDER_SCALE_QUALITY though with values 0, 1, 2 */
 #define SCREEN_FORMAT           SDL_PIXELFORMAT_ARGB8888
@@ -40,27 +39,17 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #define SCREEN_WIDTH		640
 #define SCREEN_HEIGHT		200
 
-#define FAST_CPU_CYCLES_PER_SCANLINE	227
-#define SLOW_CPU_CYCLES_PER_SCANLINE	64
+#define CPU_M65_CYCLES_PER_SCANLINE	3113
+#define CPU_C65_CYCLES_PER_SCANLINE	227
+#define CPU_C128_CYCLES_PER_SCANLINE	128
+#define CPU_C64_CYCLES_PER_SCANLINE	64
 
 #define SID_CYCLES_PER_SEC	1000000
 #define AUDIO_SAMPLE_FREQ	44100
 
-// Note: this is a hack, maybe not standard! No REC (Ram Expansion Controller) emulation is involved here ...
-// it's merely just that the upper 512K of the 1Mbyte addressing space is "free" and can be handled (maybe in a non standard way!) as RAM too ...
-// It may cause incompatibilities (ie: real REC would allow VIC3 to access REC as well, I think ... It's not the case here. And it's just one example I know about)
-#define ALLOW_512K_RAMEXP
-
-// It's *another* entity like the above, but now at the place where "expansion *ROM*" should be ... It's maybe even *worse* ... [??]
-// Combined with the 512K, the total RAM size would be 128K (base) + 512K + 256K = 896K, quite nice from a 8 bit machine
-// Enable only at your own risk!
-//#define ALLOW_256K_RAMEXP
-
-
 // If defined, a file name string must be used.
 // Then hypervisor memory content will be written into this file on exit.
-#define MEMDUMP_FILE		"dump.mem"
-
+//#define MEMDUMP_FILE		"dump.mem"
 
 extern Uint8 memory[0x100000];
 extern Uint8 colour_ram[0x10000];
@@ -71,7 +60,8 @@ extern int map_offset_high;
 extern int map_megabyte_low;
 extern int map_megabyte_high;
 extern Uint8 gs_regs[0x1000];
-//extern Uint8 cpu_port[2];
+extern char emulator_speed_title[];
+extern int  disallow_turbo;
 #define CPU_PORT(n)	memory[n]
 
 extern void  apply_memory_config ( void );

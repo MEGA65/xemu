@@ -1,5 +1,5 @@
 /* Test-case for a very simple, inaccurate, work-in-progress Commodore 65 emulator.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -38,6 +38,8 @@ Uint8 memory[0x100000];			// 65CE02 MAP'able address space
 struct Cia6526 cia1, cia2;		// CIA emulation structures for the two CIAs
 struct SidEmulation sids[2];		// the two SIDs
 static int nmi_level;			// please read the comment at nmi_set() below
+static int mouse_x = 0;
+static int mouse_y = 0;
 
 // We re-map I/O requests to a high address space does not exist for real. cpu_read() and cpu_write() should handle this as an IO space request
 // It must be high enough not to collide with the 1Mbyte address space + almost-64K "overflow" area and mapping should not cause to alter lower 12 bits of the addresses,
@@ -61,7 +63,7 @@ static int map_mask;			// MAP mask, should be filled at the MAP opcode, *before*
 static int map_offset_low;		// MAP low offset, should be filled at the MAP opcode, *before* calling apply_memory_config() then
 static int map_offset_high;		// MAP high offset, should be filled at the MAP opcode, *before* calling apply_memory_config() then
 
-
+char emulator_speed_title[] = "???MHz";
 
 
 
@@ -375,7 +377,6 @@ void cpu_do_aug ( void )
 }
 
 
-
 // *** Implements the EOM opcode of 4510, called by the 65CE02 emulator
 void cpu_do_nop ( void )
 {
@@ -390,8 +391,20 @@ void cpu_do_nop ( void )
 static inline Uint8 read_some_sid_register ( int addr )
 {
 	// currently we don't support reading SID registers at all (1351 mouse emulation may need POT-X and POT-Y in the future though, TODO)
-	// addr &= 0x1F;
-	return 0xFF;
+	switch (addr & 0x1F) {
+		case 0x19:
+			if (!is_mouse_grab())
+				return 0xFF;
+			mouse_x = (mouse_x + hid_read_mouse_rel_x(-31, 31)) & 63;
+			return mouse_x << 1;
+		case 0x1A:
+			if (!is_mouse_grab())
+				return 0xFF;
+			mouse_y = (mouse_y - hid_read_mouse_rel_y(-31, 31)) & 63;
+			return mouse_y << 1;
+		default:
+			return 0xFF;
+	}
 }
 
 
@@ -686,29 +699,44 @@ static void shutdown_callback ( void )
 }
 
 
+static void c65_reset ( void )
+{
+	memory[0] = memory[1] = 0xFF;
+	map_mask = 0;
+	vic3_registers[0x30] = 0;
+	apply_memory_config();
+	cpu_reset();
+	dma_reset();
+	nmi_level = 0;
+	DEBUG("RESET!" NL);
+}
+
+
 
 // Called by emutools_hid!!! to handle special private keys assigned to this emulator
 int emu_callback_key ( int pos, SDL_Scancode key, int pressed, int handled )
 {
 	if (pressed) {
 		if (key == SDL_SCANCODE_F10) {	// reset
-			memory[0] = memory[1] = 0xFF;
-			map_mask = 0;
-			vic3_registers[0x30] = 0;
-			apply_memory_config();
-			cpu_reset();
-			dma_reset();
-			nmi_level = 0;
-			DEBUG("RESET!" NL);
+			c65_reset();
 		} else if (key == SDL_SCANCODE_KP_ENTER)
 			c64_toggle_joy_emu();
-	}
+		else if (key == SDL_SCANCODE_ESCAPE)
+			set_mouse_grab(SDL_FALSE);
+	} else
+		if (pos == -2 && key == 0) {	// special case pos = -2, key = 0, handled = mouse button (which?) and release event!
+			if (handled == SDL_BUTTON_LEFT) {
+				OSD(-1, -1, "Mouse grab activated.\nPress ESC to cancel.");
+				set_mouse_grab(SDL_TRUE);
+			}
+		}
 	return 0;
 }
 
 
 static void update_emulator ( void )
 {
+	emu_update_screen();
 	hid_handle_all_sdl_events();
 	nmi_set(IS_RESTORE_PRESSED(), 2); // Custom handling of the restore key ...
 	emu_timekeeping_delay(40000);
@@ -741,6 +769,7 @@ int main ( int argc, char **argv )
 	if (emucfg_parse_commandline(argc, argv, NULL))
 		return 1;
 	/* Initiailize SDL - note, it must be before loading ROMs, as it depends on path info from SDL! */
+	window_title_info_addon = emulator_speed_title;
         if (emu_init_sdl(
 		TARGET_DESC APP_DESC_APPEND,	// window title
 		APP_ORG, TARGET_NAME,		// app organization and name, used with SDL pref dir formation
@@ -762,6 +791,7 @@ int main ( int argc, char **argv )
 		SID_CYCLES_PER_SEC,		// SID cycles per sec
 		AUDIO_SAMPLE_FREQ		// sound mix freq
 	);
+	osd_init_with_defaults();
 	// Start!!
 	cycles = 0;
 	if (audio)
@@ -770,7 +800,11 @@ int main ( int argc, char **argv )
 	vic3_open_frame_access();
 	emu_timekeeping_start();
 	for (;;) {
-		cycles += cpu_step();
+		cycles += unlikely(dma_status) ? dma_update_multi_steps(cpu_cycles_per_scanline) : cpu_step(
+#ifdef CPU_STEP_MULTI_OPS
+			cpu_cycles_per_scanline
+#endif
+		);	// FIXME: this is maybe not correct, that DMA's speed depends on the fast/slow clock as well?
 		if (cycles >= cpu_cycles_per_scanline) {
 			cia_tick(&cia1, 64);
 			cia_tick(&cia2, 64);
@@ -781,7 +815,6 @@ int main ( int argc, char **argv )
 					hostfs_flush_all();
 				} else {
 					frameskip = 1;
-					emu_update_screen();
 					update_emulator();
 					vic3_open_frame_access();
 				}
