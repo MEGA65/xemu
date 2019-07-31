@@ -1,5 +1,6 @@
-/* Test-case for a very simple, inaccurate, work-in-progress Commodore 65 emulator.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+/* A work-in-progess Mega-65 (Commodore-65 clone origins) emulator
+   Part of the Xemu project, please visit: https://github.com/lgblgblgb/xemu
+   Copyright (C)2016-2018 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,9 +16,16 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
-#ifndef __XEMU_C65_D81_IMAGE_H_INCLUDED
-#define __XEMU_C65_D81_IMAGE_H_INCLUDED
+#ifndef __XEMU_MEGA65_INPUT_DEVICES_H_INCLUDED
+#define __XEMU_MEGA65_INPUT_DEVICES_H_INCLUDED
 
-extern void c65_d81_init ( const char *dfn );
+extern void  clear_emu_events  ( void );
+extern Uint8 cia1_in_b         ( void );
+extern Uint8 cia1_in_a         ( void );
+extern int   emu_callback_key  ( int pos, SDL_Scancode key, int pressed, int handled );
+
+extern Uint8 hwa_kbd_get_last      ( void );
+extern Uint8 hwa_kbd_get_modifiers ( void );
+extern void  hwa_kbd_move_next     ( void );
 
 #endif

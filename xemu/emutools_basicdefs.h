@@ -1,7 +1,7 @@
 /* Xemu - Somewhat lame emulation (running on Linux/Unix/Windows/OSX, utilizing
    SDL2) of some 8 bit machines, including the Commodore LCD and Commodore 65
    and some Mega-65 features as well.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016-2018 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
    The goal of emutools.c is to provide a relative simple solution
    for relative simple emulators using SDL2.
@@ -27,6 +27,10 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #include <limits.h>
 
 #define USE_REGPARM
+
+#if defined(__EMSCRIPTEN__) && !defined(CONFIG_EMSCRIPTEN_OK)
+#error "Sorry, emscripten is not yet validated for this sub-project ..."
+#endif
 
 #ifndef XEMU_DISABLE_SDL
 #ifndef HAVE_SDL2
@@ -92,13 +96,17 @@ typedef uint64_t Uint64;
 #endif
 
 #ifdef __GNUC__
-#define likely(__x__)	__builtin_expect(!!(__x__), 1)
-#define unlikely(__x__)	__builtin_expect(!!(__x__), 0)
-#define INLINE		__attribute__ ((__always_inline__)) inline
+#define XEMU_LIKELY(__x__)	__builtin_expect(!!(__x__), 1)
+#define XEMU_UNLIKELY(__x__)	__builtin_expect(!!(__x__), 0)
+#ifdef DO_NOT_FORCE_INLINE
+#define XEMU_INLINE		inline
 #else
-#define likely(__x__)	(__x__)
-#define unlikely(__x__)	(__x__)
-#define INLINE		inline
+#define XEMU_INLINE		__attribute__ ((__always_inline__)) inline
+#endif
+#else
+#define XEMU_LIKELY(__x__)	(__x__)
+#define XEMU_UNLIKELY(__x__)	(__x__)
+#define XEMU_INLINE		inline
 #endif
 
 #if defined(USE_REGPARM) && defined(__GNUC__) && !defined(__EMSCRIPTEN__)
@@ -134,7 +142,7 @@ extern FILE *debug_fp;
 #define DEBUGPRINT(...) printf(__VA_ARGS__)
 #else
 #define DEBUG(...) do { \
-	if (unlikely(debug_fp))	\
+	if (XEMU_UNLIKELY(debug_fp))	\
 		fprintf(debug_fp, __VA_ARGS__);	\
 } while (0)
 #define DEBUGPRINT(...) do {	\

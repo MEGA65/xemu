@@ -27,7 +27,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 #include "xemu/emutools.h"
 #include "commodore_65.h"
-#include "xemu/cpu65c02.h"
+#include "xemu/cpu65.h"
 #include "vic3.h"
 
 
@@ -100,7 +100,7 @@ char scanline_render_debug_info[320];
 void vic3_open_frame_access ( void )
 {
 	int tail_sdl;
-	pixel = pixel_start = emu_start_pixel_buffer_access(&tail_sdl);
+	pixel = pixel_start = xemu_start_pixel_buffer_access(&tail_sdl);
 	pixel_end = pixel + (SCREEN_WIDTH * SCREEN_HEIGHT);
 	if (tail_sdl)
 		FATAL("tail_sdl is not zero!");
@@ -111,7 +111,7 @@ void vic3_open_frame_access ( void )
 
 static void vic3_interrupt_checker ( void )
 {
-	int vic_irq_old = cpu_irqLevel & 2;
+	int vic_irq_old = cpu65.irqLevel & 2;
 	int vic_irq_new;
 	if ((interrupt_status & vic3_registers[0x1A])) {
 		interrupt_status |= 128;
@@ -123,9 +123,9 @@ static void vic3_interrupt_checker ( void )
 	if (vic_irq_old != vic_irq_new) {
 		DEBUG("VIC3: interrupt change %s -> %s" NL, vic_irq_old ? "active" : "inactive", vic_irq_new ? "active" : "inactive");
 		if (vic_irq_new)
-			cpu_irqLevel |= 2;
+			cpu65.irqLevel |= 2;
 		else
-			cpu_irqLevel &= ~2;
+			cpu65.irqLevel &= ~2;
 	}
 }
 
@@ -198,7 +198,7 @@ static void renderer_text_40 ( void )
 		Uint8 vdata = chargen[(*(vp++)) << 3];
 		Uint32 colour = *(cp++);
 		Uint32 fg_colour;
-		VIC3_ADJUST_BY_HARDWARE_ATTRIBUTES(unlikely(colour & attributes), colour, vdata);
+		VIC3_ADJUST_BY_HARDWARE_ATTRIBUTES(XEMU_UNLIKELY(colour & attributes), colour, vdata);
 		fg_colour = palette[colour];
 		pixel[ 0] = pixel[ 1] = vdata & 0x80 ? fg_colour : bg_colour;
 		pixel[ 2] = pixel[ 3] = vdata & 0x40 ? fg_colour : bg_colour;
@@ -226,7 +226,7 @@ static void renderer_text_80 ( void )
 		Uint8 vdata = chargen[(*(vp++)) << 3];
 		Uint8 colour = *(cp++);
 		Uint32 fg_colour;
-		VIC3_ADJUST_BY_HARDWARE_ATTRIBUTES(unlikely(colour & attributes), colour, vdata);
+		VIC3_ADJUST_BY_HARDWARE_ATTRIBUTES(XEMU_UNLIKELY(colour & attributes), colour, vdata);
 		fg_colour = palette[colour];
 		*(pixel++) = vdata & 0x80 ? fg_colour : bg_colour;
 		*(pixel++) = vdata & 0x40 ? fg_colour : bg_colour;
@@ -593,12 +593,12 @@ int vic3_render_scanline ( void )
 			blink_phase = ~blink_phase;
 		}
 		if (!frameskip) {
-			if (unlikely(pixel != pixel_end))
+			if (XEMU_UNLIKELY(pixel != pixel_end))
 				FATAL("Renderer failure: pixel=%p != end=%p (diff=%d) height=%d", pixel, pixel_end, (int)(pixel_end - pixel), SCREEN_HEIGHT);
 			// FIXME: Highly incorrect, rendering sprites once *AFTER* the screen content ...
 			sprite_renderer();
 		} else {
-			if (unlikely(pixel != pixel_start))
+			if (XEMU_UNLIKELY(pixel != pixel_start))
 				FATAL("Renderer failure: pixel=%p != start=%p", pixel, pixel_start);
 		}
 		return 1; // return value non-zero: end-of-frame, emulator should update the SDL rendering context, then call vic3_open_frame_access()
@@ -770,7 +770,7 @@ void vic3_write_reg ( int addr, Uint8 data )
 			// Save some un-needed memory translating table rebuilds, if there is important bits (for us) changed.
 			// CRAM@DC00 is not handled by the translator directly, so bit0 does not apply here!
 			if (
-				(data & 0xF8) != (vic3_registers[0x30] & 0xF8)
+				(data & 0xB8) != (vic3_registers[0x30] & 0xB8)
 			) {
 				DEBUG("MEM: applying new memory configuration because of VIC3 $30 is written" NL);
 				vic3_registers[0x30] = data;	// early write because of apply_memory_config() needs it

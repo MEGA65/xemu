@@ -1,6 +1,6 @@
 /* Test-case for a very simple and inaccurate Commodore VIC-20 emulator using SDL2 library
    within the Xemu project.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
    This is the VIC-20 emulation. Note: the source is overcrowded with comments by intent :)
    That it can useful for other people as well, or someone wants to contribute, etc ...
@@ -20,14 +20,19 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 #include "xemu/emutools.h"
+#include "xemu/emutools_files.h"
 #include "xemu/emutools_hid.h"
+#include "xemu/emutools_config.h"
 #include "commodore_vic20.h"
-#include "xemu/cpu65c02.h"
+#include "xemu/cpu65.h"
 #include "xemu/via65c22.h"
 #include "vic6561.h"
 
 #define SCREEN_HEIGHT		(SCREEN_LAST_VISIBLE_SCANLINE - SCREEN_FIRST_VISIBLE_SCANLINE + 1)
 #define SCREEN_WIDTH		(SCREEN_LAST_VISIBLE_DOTPOS   - SCREEN_FIRST_VISIBLE_DOTPOS   + 1)
+
+
+static const char *rom_fatal_msg = "This is one of the selected ROMs. Without it, Xemu won't work.\nInstall it, or use -romXXX CLI switches to specify another path, see the -h output for help.";
 
 
 static Uint8 memory[0x10001];	// 64K (+1 for load check) address space of the 6502 CPU (some of it is ROM, undecoded, whatsoever ... it's simply the whole address space, *NOT* only RAM!)
@@ -66,7 +71,7 @@ static Uint8 is_kpage_writable[64] = {		// writable flag (for different memory e
 	0,0,0,0,0,0,0,0,// @16K-23K (sum 8K), expansion block [will be filled with RAM on memcfg request]
 	0,0,0,0,0,0,0,0,// @24K-31K (sum 8K), expansion block [will be filled with RAM on memcfg request]
 	0,0,0,0,	// @32K-35K (sum 4K), character ROM (VIC-I can reach it)
-	0,		// @36K     (sum 1K), I/O block   (VIAs, VIC-I, ...)
+	0,		// @36K     (sum 1K), I/O block 0 (VIAs, VIC-I, ...)
 	1,		// @37K     (sum 1K), colour RAM (VIC-I can reach it directly), only 0.5K, but the position depends on the config ... [handled as a special case on READ - 4 bit wide only!]
 	0,		// @38K     (sum 1K), I/O block 2 (not used now, gives 0xFF on read)
 	0,		// @39K     (sum 1K), I/O block 3 (not used now, gives 0xFF on read)
@@ -91,7 +96,7 @@ static Uint8 *vic_address_space_lo8[16] = {	// configure low 8 bits of VIC-I dat
 #define VIRTUAL_SHIFT_POS	0x31
 
 
-static const struct KeyMapping vic20_key_map[] = {
+static const struct KeyMappingDefault vic20_key_map[] = {
 	{ SDL_SCANCODE_1,		0x00 }, // 1
 	{ SDL_SCANCODE_3,		0x01 }, // 3
 	{ SDL_SCANCODE_5,		0x02 }, // 5
@@ -215,7 +220,7 @@ static void execute_monitor_command ( void )
 	while (*p <= 32)
 		p++;
 	if (p[0] == 'X') {
-		cpu_a = 0;	// do not continue ...
+		cpu65.a = 0;	// do not continue ...
 		emuprint("\r");
 		return;
 	}
@@ -253,16 +258,16 @@ static int is_our_rom ( void )
 
 
 
-// Need to be defined, if CPU_TRAP is defined for the CPU emulator!
-int cpu_trap ( Uint8 opcode )
+// Need to be defined, if CPU65_TRAP_OPCODE is defined for the CPU emulator!
+int cpu65_trap_callback ( Uint8 opcode )
 {
-	if (cpu_pc >= 0xA000 && opcode == CPU_TRAP) {	// cpu_pc always meant to be the position _after_ the trap opcode!
-		Uint8 trap = memory[cpu_pc];
+	if (cpu65.pc >= 0xA000 && opcode == CPU65_TRAP_OPCODE) {	// cpu65.pc always meant to be the position _after_ the trap opcode!
+		Uint8 trap = memory[cpu65.pc];
 		if (is_our_rom() < 0)
-			FATAL("Unknown ROM/RAM code at $%04X caused trap!", cpu_pc - 1);
+			FATAL("Unknown ROM/RAM code at $%04X caused trap!", cpu65.pc - 1);
 		switch (trap) {
 			case 0:
-				cpu_a = inject_prg();
+				cpu65.a = inject_prg();
 				EMUPRINTF("\rMONITOR: SYS %d\r", 0xA009);
 				break;
 			case 1:
@@ -272,19 +277,26 @@ int cpu_trap ( Uint8 opcode )
 					memory[648] << 8,
 					vic20_get_memconfig_string()
 				);
-				cpu_a = 1;
+				cpu65.a = 1;
 				break;
 			case 2:
-				cpu_a = 1;	// by default, set the continue flag ...
+				cpu65.a = 1;	// by default, set the continue flag ...
 				execute_monitor_command();
 				break;
 			default:
-				FATAL("Unknown CPU trap (%d) at $%04X", trap, cpu_pc - 1);
+				FATAL("Unknown CPU trap (%d) at $%04X", trap, cpu65.pc - 1);
 		}
-		cpu_pc++;	// jump over the trap number byte ...
+		cpu65.pc++;	// jump over the trap number byte ...
 		return 1; // you must return with the CPU cycles used, but at least with value of 1!
 	} else
 		return 0; // ignore trap!! Return with zero means, the CPU emulator should execute the opcode anyway
+}
+
+
+void cpu65_illegal_opcode_callback ( void )
+{
+	ERROR_WINDOW("Unemulated NMOS 6502 opcode $%02X at PC=$%04X", cpu65.op, cpu65.pc - 1);
+	cpu65_reset();
 }
 
 
@@ -298,16 +310,16 @@ void clear_emu_events ( void )
 
 // Called by CPU emulation code when any kind of memory byte must be written.
 // Note: optimization is used, to make the *most common* type of write access easy. Even if the whole function is more complex, or longer/slower this way for other accesses!
-void  cpu_write ( Uint16 addr, Uint8 data )
+void  cpu65_write_callback ( Uint16 addr, Uint8 data )
 {
 	// Write optimization, handle the most common case first: memory byte to be written is not special, ie writable RAM, not I/O, etc
-	if (is_kpage_writable[addr >> 10]) {	// writable flag for every Kbytes of 64K is checked (for different memory configurations, faster "decoding", etc)
+	if (XEMU_LIKELY(is_kpage_writable[addr >> 10])) {	// writable flag for every Kbytes of 64K is checked (for different memory configurations, faster "decoding", etc)
 		memory[addr] = data;
 		return;
 	}
 	// ELSE: other kind of address space is tried to be written ...
 	// TODO check if I/O devices are fully decoded or there can be multiple mirror ranges
-	if ((addr & 0xFFF0) == 0x9000) {	// VIC-I register is written
+	if ((addr & 0xFF00) == 0x9000) {	// VIC-I register is written (decoded for a full 256 bytes long area)
 		cpu_vic_reg_write(addr & 0xF, data);
 		return;
 	}
@@ -325,20 +337,25 @@ void  cpu_write ( Uint16 addr, Uint8 data )
 
 
 // TODO: Use RMW write function in a proper way!
-void cpu_write_rmw ( Uint16 addr, Uint8 old_data, Uint8 new_data )
+void cpu65_write_rmw_callback ( Uint16 addr, Uint8 old_data, Uint8 new_data )
 {
-	cpu_write(addr, new_data);
+	if (XEMU_UNLIKELY(addr & 0x8000)) {
+		cpu65_write_callback(addr, old_data);
+		cpu65_write_callback(addr, new_data);
+	} else {
+		cpu65_write_callback(addr, new_data);
+	}
 }
 
 
 // Called by CPU emulation code when any kind of memory byte must be read.
 // Note: optimization is used, to make the *most common* type of read access easy. Even if the whole function is more complex, or longer/slower this way for other accesses!
-Uint8 cpu_read ( Uint16 addr )
+Uint8 cpu65_read_callback ( Uint16 addr )
 {
 	// Optimization: handle the most common case first!
 	// Check if our read is NOT about the (built-in) I/O area. If it's true, let's just use the memory array
 	// (even for undecoded areas, memory[] is intiailized with 0xFF values
-	if ((addr & 0xF800) != 0x9000)
+	if (XEMU_LIKELY((addr & 0xF800) != 0x9000))
 		return memory[addr];
 	// ELSE: it IS the I/O area or colour SRAM ... Let's see what we want!
 	// TODO check if I/O devices are fully decoded or there can be multiple mirror ranges
@@ -366,12 +383,12 @@ int emu_callback_key ( int pos, SDL_Scancode key, int pressed, int handled )
 static void update_emulator ( void )
 {
 	if (!frameskip) {
-		// First: render VIC-20 screen ...
-		emu_update_screen();
+		// First: update VIC-20 screen ...
+		xemu_update_screen();
 		// Second: we must handle SDL events waiting for us in the event queue ...
 		hid_handle_all_sdl_events();
 		// Third: Sleep ... Please read emutools.c source about this madness ... 40000 is (PAL) microseconds for a full frame to be produced
-		emu_timekeeping_delay(FULL_FRAME_USECS);
+		xemu_timekeeping_delay(FULL_FRAME_USECS);
 	}
 	vic_vsync(!frameskip);	// prepare for the next frame!
 }
@@ -385,7 +402,7 @@ static void via1_setint ( int level )
 {
 	if (nmi_level != level) {
 		printf("VIA-1: NMI edge: %d->%d" NL, nmi_level, level);
-		cpu_nmiEdge = 1;
+		cpu65.nmiEdge = 1;
 		nmi_level = level;
 	}
 }
@@ -394,7 +411,7 @@ static void via1_setint ( int level )
 // VIA-2 is used to generate IRQ on VIC-20
 static void via2_setint ( int level )
 {
-	cpu_irqLevel = level;
+	cpu65.irqLevel = level;
 }
 
 
@@ -435,87 +452,53 @@ static Uint8 via2_inb ( Uint8 mask )
 
 
 
-#define LOAD_ERROR(...) do {	\
-	ERROR_WINDOW(__VA_ARGS__);	\
-	free(emufile_p);	\
-	emufile_p = NULL;	\
-	emufile_size = 0;	\
-} while(0)
+static int cycles;
 
 
-
-
-static void parse_command_line ( int argc, char **argv )
+static void emulation_loop ( void )
 {
-	int a;
-	emurom_policy = 0;	// normally: "boot" into BASIC
-	emufile_p = NULL;
-	emufile_size = 0;
-	for (a = 1; a < argc; a++) {
-		if (argv[a][0] == '@') {
-			if (!strcmp(argv[a] + 1, "1"))
-				__mark_ram( 1, 3);
-			else if (!strcmp(argv[a] + 1, "8"))
-				__mark_ram( 8, 8);
-			else if (!strcmp(argv[a] + 1, "16"))
-				__mark_ram(16, 8);
-			else if (!strcmp(argv[a] + 1, "24"))
-				__mark_ram(24, 8);
-			else if (!strcmp(argv[a] + 1, "40")) {
-				__mark_ram(40, 8);
-				INFO_WINDOW("Warning, RAM from 40K (at $A000) is defined.\nThis may collide with the loaded EMU ROM there!");
+	for (;;) { // our emulation loop ...
+		int opcyc;
+		opcyc = cpu65_step();	// execute one opcode (or accept IRQ, etc), return value is the used clock cycles
+		via_tick(&via1, opcyc);	// run VIA-1 tasks for the same amount of cycles as the CPU
+		via_tick(&via2, opcyc);	// -- "" -- the same for VIA-2
+		cycles += opcyc;
+		if (cycles >= CYCLES_PER_SCANLINE) {	// if [at least!] 71 (on PAL) CPU cycles passed then render a VIC-I scanline, and maintain scanline value + texture/SDL update (at the end of a frame)
+			// render one (scan)line. Note: this is INACCURATE, we should do rendering per dot clock/cycle or something,
+			// but for a simple emulator like this, it's already acceptable solultion, I think!
+			// Note about frameskip: we render only every second (half) frame, no interlace (PAL VIC), not so correct, but we also save some resources this way
+			if (!frameskip)
+				vic_render_line();
+			if (scanline == LAST_SCANLINE) {
+				update_emulator();
+				frameskip = !frameskip;
+				return;
 			} else
-				FATAL("Unknown command line memory ('@') option: %s", argv[a]);
-		} else if (argv[a][0] == '-') {
-			if (argv[a][1] == 0) {	// a single '-' option is interpreted, as monitor should be run
-				emurom_policy = 1;	// will cause to "boot" into monitor
-			} else
-				FATAL("Unknown command line '-' option: %s", argv[a]);
-		} else {
-			int ret;
-			emufile_p = emu_malloc(0x8000);
-			emufile_p[0] = '!';
-			strcpy(emufile_p + 1, argv[a]);
-			ret = emu_load_file(emufile_p, emufile_p, 0x8000);
-			if (ret < 0)
-				LOAD_ERROR("Cannot load file %s", argv[a]);
-			else if (ret < 3)
-				LOAD_ERROR("Abnormally short loaded file");
-			else if (ret == 0x8000)
-				LOAD_ERROR("Too large loaded file");
-			else {
-				emufile_size = ret;
-			}
+				scanline++;
+			cycles -= CYCLES_PER_SCANLINE;
 		}
 	}
 }
 
 
-static int rom_load ( const char *name, void *buffer, int size )
-{
-	void *load_buffer = emu_malloc(size + 1);
-	int ret = emu_load_file(name, load_buffer, size + 1);
-	if (ret < 0) {
-		free(load_buffer);
-		ERROR_WINDOW("Cannot load ROM %s", name);
-		return -1;
-	} else if (ret != size) {
-		free(load_buffer);
-		ERROR_WINDOW("Wrong ROM size %s\nShould be %d bytes long.", name, size);
-		return -1;
-	}
-	memcpy(buffer, load_buffer, size);
-	free(load_buffer);
-	return 0;
-}
-
-
-
 
 int main ( int argc, char **argv )
 {
-	int cycles;
-	xemu_dump_version(stdout, "The Inaccurate Commodore VIC-20 emulator from LGB");
+	xemu_pre_init(APP_ORG, TARGET_NAME, "The Inaccurate Commodore VIC-20 emulator from LGB");
+	xemucfg_define_switch_option("bootmon", "Boot into monitor");
+	xemucfg_define_switch_option("fullscreen", "Start in fullscreen mode");
+	xemucfg_define_str_option("prg", NULL, "Load a PRG file");
+	xemucfg_define_str_option("ramexp", NULL, "Comma separated list of installed RAM expansions at Kbyte(s)");
+	xemucfg_define_str_option("romchr",    CHR_ROM_NAME, "Sets character ROM to use");
+	xemucfg_define_str_option("rombasic",  BASIC_ROM_NAME, "Sets BASIC ROM to use");
+	xemucfg_define_str_option("romkernal", KERNAL_ROM_NAME, "Sets KERNAL ROM to use");
+	xemucfg_define_str_option("romemu",    EMU_ROM_NAME, "Sets EMU ROM to use");
+	xemucfg_define_switch_option("syscon", "Keep system console open (Windows-specific effect only)");
+	if (xemucfg_parse_all(argc, argv))
+		return 1;
+	emurom_policy = xemucfg_get_bool("bootmon");	// normally: "boot" into BASIC, but to monitor of -bootmon was used
+	emufile_p = NULL;
+	emufile_size = 0;
 	printf(
 		"INFO: CPU clock frequency (calculated) %d Hz (wanted: %d Hz)" NL
 		"INFO: Texture resolution is %dx%d" NL
@@ -527,9 +510,8 @@ int main ( int argc, char **argv )
 		SCREEN_LAST_VISIBLE_DOTPOS,  SCREEN_LAST_VISIBLE_SCANLINE
 	);
 	/* Initiailize SDL - note, it must be before loading ROMs, as it depends on path info from SDL! */
-	if (emu_init_sdl(
+	if (xemu_post_init(
 		TARGET_DESC APP_DESC_APPEND,	// window title
-		APP_ORG, TARGET_NAME,		// app organization and name, used with SDL pref dir formation
 		1,				// resizable window
 		SCREEN_WIDTH, SCREEN_HEIGHT,	// texture sizes
 		SCREEN_WIDTH * 2, SCREEN_HEIGHT,	// logical size (width is doubled for somewhat correct aspect ratio)
@@ -548,30 +530,66 @@ int main ( int argc, char **argv )
 		VIRTUAL_SHIFT_POS,
 		SDL_ENABLE		// enable HID joy events
 	);
-	/* Parse command line */
-	parse_command_line(argc, argv);
+	// Program to load?
+	if (xemucfg_get_str("prg")) {
+		emufile_size = xemu_load_file(xemucfg_get_str("prg"), NULL, 3, 0x8000, "Cannot load user specified PRG with -prg");
+		if (emufile_size < 0) {
+			emufile_p = NULL;
+			emufile_size = 0;
+		} else
+			emufile_p = xemu_load_buffer_p;
+	}
+	// RAM expansion
+	if (xemucfg_get_str("ramexp")) {
+		int explist[5], r = xemucfg_integer_list_from_string(xemucfg_get_str("ramexp"), explist, 5, ",");
+		if (r < 0)
+			FATAL("Invalid memory expansion list (not comma separated list, more than 5 elements, etc) syntax given with -ramexp");
+		else
+			while (r--)
+				switch (explist[r]) {
+					case  1:
+						__mark_ram( 1, 3);
+						break;
+					case  8:
+						__mark_ram( 8, 8);
+						break;
+					case 16:
+						__mark_ram(16, 8);
+						break;
+					case 24:
+						__mark_ram(24, 8);
+						break;
+					case 40:
+						__mark_ram(40, 8);
+						INFO_WINDOW("Warning, RAM from 40K (at $A000) is defined.\nThis may collide with the loaded EMU ROM there!");
+						break;
+					default:
+						FATAL("Unknown memory expansion element %d in -ramexp %s", explist[r], xemucfg_get_str("ramexp"));
+						break;
+				}
+	}
 	/* Intialize memory and load ROMs */
 	memset(memory, 0xFF, sizeof memory);
 	memset(dummy_vic_access, 0xFF, sizeof dummy_vic_access);	// define 1K of "nothing" for VIC-I memory regions what it can't access by hardware constraints
 	if (
-		rom_load(CHR_ROM_NAME,    memory + 0x8000, 0x1000) < 0 ||		// load chargen ROM
-		rom_load(BASIC_ROM_NAME,  memory + 0xC000, 0x2000) < 0 ||		// load basic ROM
-		rom_load(KERNAL_ROM_NAME, memory + 0xE000, 0x2000) < 0 ||		// load kernal ROM
-		rom_load(EMU_ROM_NAME,    memory + 0xA000, 0x2000) < 0			// load our "emulator monitor" ROM
+		xemu_load_file(xemucfg_get_str("romchr"),    memory + 0x8000, 0x1000, 0x1000, rom_fatal_msg) < 0 ||	// load chargen ROM
+		xemu_load_file(xemucfg_get_str("rombasic"),  memory + 0xC000, 0x2000, 0x2000, rom_fatal_msg) < 0 ||	// load basic ROM
+		xemu_load_file(xemucfg_get_str("romkernal"), memory + 0xE000, 0x2000, 0x2000, rom_fatal_msg) < 0 ||	// load kernal ROM
+		xemu_load_file(xemucfg_get_str("romemu"),    memory + 0xA000, 0x2000, 0x2000, rom_fatal_msg) < 0		// load our "emulator monitor" ROM
 	)
 		return 1;
 	// Check our "emulator monitor" ROM ...
 	if (is_our_rom() < -1) {
-		ERROR_WINDOW("Unknown emulator ROM " EMU_ROM_NAME);
+		ERROR_WINDOW("Unknown emulator ROM: %s", xemucfg_get_str("romemu"));
 		return 1;
 	}
 	if (is_our_rom() != EMU_ROM_VERSION) {
-		ERROR_WINDOW("Bad emulator ROM " EMU_ROM_NAME " version, we need v%d\nPlease upgrade the ROM image!", EMU_ROM_VERSION);
+		ERROR_WINDOW("Bad emulator ROM %s version, we need v%d\nPlease upgrade the ROM image!", xemucfg_get_str("romemu"), EMU_ROM_VERSION);
 		return 1;
 	}
 	// Continue with initializing ...
 	clear_emu_events();	// also resets the keyboard
-	cpu_reset();	// reset CPU: it must be AFTER kernal is loaded at least, as reset also fetches the reset vector into PC ...
+	cpu65_reset();	// reset CPU: it must be AFTER kernal is loaded at least, as reset also fetches the reset vector into PC ...
 	// Initiailize VIAs.
 	// Note: this is my unfinished VIA emulation skeleton, for my Commodore LCD emulator originally, ported from my JavaScript code :)
 	// it uses callback functions, which must be registered here, NULL values means unused functionality
@@ -595,26 +613,10 @@ int main ( int argc, char **argv )
 	);
 	vic_init(vic_address_space_lo8, vic_address_space_hi4);
 	cycles = 0;
-	emu_timekeeping_start();	// we must call this once, right before the start of the emulation
-	for (;;) { // our emulation loop ...
-		int opcyc;
-		opcyc = cpu_step();	// execute one opcode (or accept IRQ, etc), return value is the used clock cycles
-		via_tick(&via1, opcyc);	// run VIA-1 tasks for the same amount of cycles as the CPU
-		via_tick(&via2, opcyc);	// -- "" -- the same for VIA-2
-		cycles += opcyc;
-		if (cycles >= CYCLES_PER_SCANLINE) {	// if [at least!] 71 (on PAL) CPU cycles passed then render a VIC-I scanline, and maintain scanline value + texture/SDL update (at the end of a frame)
-			// render one (scan)line. Note: this is INACCURATE, we should do rendering per dot clock/cycle or something,
-			// but for a simple emulator like this, it's already acceptable solultion, I think!
-			// Note about frameskip: we render only every second (half) frame, no interlace (PAL VIC), not so correct, but we also save some resources this way
-			if (!frameskip)
-				vic_render_line();
-			if (scanline == LAST_SCANLINE) {
-				update_emulator();
-				frameskip = !frameskip;
-			} else
-				scanline++;
-			cycles -= CYCLES_PER_SCANLINE;
-		}
-	}
+	xemu_set_full_screen(xemucfg_get_bool("fullscreen"));
+	if (!xemucfg_get_bool("syscon"))
+		sysconsole_close(NULL);
+	xemu_timekeeping_start();	// we must call this once, right before the start of the emulation
+	XEMU_MAIN_LOOP(emulation_loop, 25, 1);
 	return 0;
 }

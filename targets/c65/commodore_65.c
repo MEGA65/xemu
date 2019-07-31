@@ -1,5 +1,5 @@
 /* Test-case for a very simple, inaccurate, work-in-progress Commodore 65 emulator.
-   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016-2019 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -16,11 +16,12 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 #include "xemu/emutools.h"
+#include "xemu/emutools_files.h"
 #include "commodore_65.h"
-#include "xemu/cpu65c02.h"
+#include "xemu/cpu65.h"
 #include "xemu/cia6526.h"
 #include "xemu/f011_core.h"
-#include "c65_d81_image.h"
+#include "xemu/d81access.h"
 #include "xemu/f018_core.h"
 #include "xemu/emutools_hid.h"
 #include "vic3.h"
@@ -40,6 +41,10 @@ struct SidEmulation sids[2];		// the two SIDs
 static int nmi_level;			// please read the comment at nmi_set() below
 static int mouse_x = 0;
 static int mouse_y = 0;
+static int shift_status = 0;
+
+Uint8 disk_cache[512];			// internal memory of the F011 disk controller
+
 
 // We re-map I/O requests to a high address space does not exist for real. cpu_read() and cpu_write() should handle this as an IO space request
 // It must be high enough not to collide with the 1Mbyte address space + almost-64K "overflow" area and mapping should not cause to alter lower 12 bits of the addresses,
@@ -141,9 +146,9 @@ static void cia1_setint_cb ( int level )
 {
 	DEBUG("%s: IRQ level changed to %d" NL, cia1.name, level);
 	if (level)
-		cpu_irqLevel |= 1;
+		cpu65.irqLevel |= 1;
 	else
-		cpu_irqLevel &= ~1;
+		cpu65.irqLevel &= ~1;
 }
 
 
@@ -164,7 +169,7 @@ static inline void nmi_set ( int level, int mask )
 		nmi_new_level = nmi_level & (~mask);
 	if ((!nmi_level) && nmi_new_level) {
 		DEBUG("NMI edge is emulated towards the CPU (%d->%d)" NL, nmi_level, nmi_new_level);
-		cpu_nmiEdge = 1;	// the "NMI edge" trigger is deleted by the CPU emulator itself (it's not a level trigger)
+		cpu65.nmiEdge = 1;	// the "NMI edge" trigger is deleted by the CPU emulator itself (it's not a level trigger)
 	}
 	nmi_level = nmi_new_level;
 }
@@ -184,28 +189,30 @@ void clear_emu_events ( void )
 }
 
 
-#define KBSEL cia1.PRA
+static Uint8 port_d607 = 0xFF;
 
 
 static Uint8 cia1_in_b ( void )
 {
-	return
-		((KBSEL &   1) ? 0xFF : kbd_matrix[0]) &
-		((KBSEL &   2) ? 0xFF : kbd_matrix[1]) &
-		((KBSEL &   4) ? 0xFF : kbd_matrix[2]) &
-		((KBSEL &   8) ? 0xFF : kbd_matrix[3]) &
-		((KBSEL &  16) ? 0xFF : kbd_matrix[4]) &
-		((KBSEL &  32) ? 0xFF : kbd_matrix[5]) &
-		((KBSEL &  64) ? 0xFF : kbd_matrix[6]) &
-		((KBSEL & 128) ? 0xFF : kbd_matrix[7]) &
-		(joystick_emu == 1 ? c64_get_joy_state() : 0xFF)
-	;
+#ifdef FAKE_TYPING_SUPPORT
+ 	if (XEMU_UNLIKELY(c64_fake_typing_enabled) && (((cia1.PRA | (~cia1.DDRA)) & 0xFF) != 0xFF) && (((cia1.PRB | (~cia1.DDRB)) & 0xFF) == 0xFF))
+		c64_handle_fake_typing_internals(cia1.PRA | (~cia1.DDRA));
+#endif
+	return c64_keyboard_read_on_CIA1_B(
+		cia1.PRA | (~cia1.DDRA),
+		cia1.PRB | (~cia1.DDRB),
+		joystick_emu == 1 ? c64_get_joy_state() : 0xFF, port_d607 & 2
+	);
 }
 
 
 static Uint8 cia1_in_a ( void )
 {
-	return joystick_emu == 2 ? c64_get_joy_state() : 0xFF;
+	return c64_keyboard_read_on_CIA1_A(
+		cia1.PRB | (~cia1.DDRB),
+		cia1.PRA | (~cia1.DDRA),
+		joystick_emu == 2 ? c64_get_joy_state() : 0xFF
+	);
 }
 
 
@@ -250,6 +257,44 @@ static void c65_snapshot_saver_on_exit_callback ( void )
 #endif
 
 
+// define the callback, d81access call this, we can dispatch the change in FDC config to the F011 core emulation this way, automatically
+void d81access_cb_chgmode ( int mode ) {
+	int have_disk = ((mode & 0xFF) != D81ACCESS_EMPTY);
+	int can_write = (!(mode & D81ACCESS_RO));
+	DEBUGPRINT("C65FDC: configuring F011 FDC with have_disk=%d, can_write=%d" NL, have_disk, can_write);
+	fdc_set_disk(have_disk, can_write);
+}
+// Here we implement F011 core's callbacks using d81access (and yes, F011 uses 512 bytes long sectors for real)
+int fdc_cb_rd_sec ( Uint8 *buffer, int d81_offset ) {
+	int ret = d81access_read_sect(buffer, d81_offset, 512);
+	DEBUG("C65FDC: D81: reading sector at d81_offset=%d, return value=%d" NL, d81_offset, ret);
+	return ret;
+}
+int fdc_cb_wr_sec ( Uint8 *buffer, int d81_offset ) {
+	int ret = d81access_write_sect(buffer, d81_offset, 512);
+	DEBUG("C65FDC: D81: writing sector at d81_offset=%d, return value=%d" NL, d81_offset, ret);
+	return ret;
+}
+
+
+static int detect_rom_version ( Uint8 *s )
+{
+	if (s[0] == 0x56) {	// 'V'
+		int version = 0;
+		for (int a = 0; a < 6; a++) {
+			s++;
+			if (*s >= '0' && *s <= '9')
+				version = version * 10 + *s - '0';
+			else
+				return 0;
+		}
+		return (version >= C65_ROM_MINIMAL_VERSION_DATE && version <= C65_ROM_MAXIMAL_VERSION_DATE) ? version : 0;
+	} else
+		return 0;
+}
+
+
+
 static void c65_init ( int sid_cycles_per_sec, int sound_mix_freq )
 {
 	const char *p;
@@ -259,10 +304,13 @@ static void c65_init ( int sid_cycles_per_sec, int sound_mix_freq )
 		VIRTUAL_SHIFT_POS,
 		SDL_ENABLE		// joy HID events enabled
 	);
+#ifdef HID_KBD_MAP_CFG_SUPPORT
+	hid_keymap_from_config_file(xemucfg_get_str("keymap"));
+#endif
 	joystick_emu = 1;
 	nmi_level = 0;
 	// *** host-FS
-	p = emucfg_get_str("hostfsdir");
+	p = xemucfg_get_str("hostfsdir");
 	if (p)
 		hostfs_init(p, NULL);
 	else
@@ -270,9 +318,14 @@ static void c65_init ( int sid_cycles_per_sec, int sound_mix_freq )
 	// *** Init memory space
 	memset(memory, 0xFF, sizeof memory);
 	// *** Load ROM image
-	p = emucfg_get_str("rom");
-	if (emu_load_file(p, memory + 0x20000, 0x20001) != 0x20000)
-		FATAL("Cannot load C65 system ROM (%s) or invalid size!", p);
+	p = xemucfg_get_str("rom");
+	if (xemu_load_file(p, memory + 0x20000, 0x20000, 0x20000, "Selected C65 system ROM is needed for Xemu") < 0)
+		XEMUEXIT(1);
+	int rom_version = detect_rom_version(memory + 0x20000 + 0x16);
+	if (rom_version)
+		DEBUGPRINT("ROM: version string = V%d" NL, rom_version);
+	else
+		WARNING_WINDOW("Warning: unknown ROM version (no valid VXXXXXX date string at offset $10?)");
 	// *** Initialize VIC3
 	vic3_init();
 	// *** Memory configuration
@@ -299,22 +352,24 @@ static void c65_init ( int sid_cycles_per_sec, int sound_mix_freq )
 		cia2_setint_cb		// callback: SETINT ~ that would be NMI in our case
 	);
 	// *** Initialize DMA
-	dma_init(
-		emucfg_get_num("dmarev"),
-		read_phys_mem,	// dma_reader_cb_t set_source_mreader ,
-		write_phys_mem,	// dma_writer_cb_t set_source_mwriter ,
-		read_phys_mem,	// dma_reader_cb_t set_target_mreader ,
-		write_phys_mem,	// dma_writer_cb_t set_target_mwriter,
-		io_read,	// dma_reader_cb_t set_source_ioreader,
-		io_write,	// dma_writer_cb_t set_source_iowriter,
-		io_read,	// dma_reader_cb_t set_target_ioreader,
-		io_write,	// dma_writer_cb_t set_target_iowriter,
-		read_phys_mem	// dma_reader_cb_t set_list_reader
-	);
-	dma_set_phys_io_offset(0);
+	if ((xemucfg_get_num("dmarev") & 0xFF) == 2) {
+		if (rom_version) {
+			int dma_version_detect = rom_version >= C65_ROM_DMA_R2_VERSION_DATE ? 1 : 0;
+			DEBUGPRINT("DMA: according to ROM version and requested auto-detection (-dmarev 2), DMA rev #%d will be used" NL, dma_version_detect);
+			dma_init(dma_version_detect | (xemucfg_get_num("dmarev") & (~0xFF)));
+		} else {
+			ERROR_WINDOW("ROM version auto-detect requested for DMA (-dmarev 2), but cannot detect version\nThese can lead to serious issues, you must use proper ROM or manually set DMA revision!");
+			dma_init(0 | (xemucfg_get_num("dmarev") & (~0xFF)));
+		}
+	} else {
+		dma_init(xemucfg_get_num("dmarev"));
+	}
 	// Initialize FDC
-	fdc_init();
-	c65_d81_init(emucfg_get_str("8"));
+	fdc_init(disk_cache);
+	// Initialize D81 access abstraction for FDC
+	d81access_init();
+	atexit(d81access_close);
+	d81access_attach_fsobj(xemucfg_get_str("8"), D81ACCESS_IMG | D81ACCESS_PRG | D81ACCESS_DIR | D81ACCESS_AUTOCLOSE | (xemucfg_get_bool("d81ro") ? D81ACCESS_RO : 0));
 	// SIDs, plus SDL audio
 	sid_init(&sids[0], sid_cycles_per_sec, sound_mix_freq);
 	sid_init(&sids[1], sid_cycles_per_sec, sound_mix_freq);
@@ -340,17 +395,17 @@ static void c65_init ( int sid_cycles_per_sec, int sound_mix_freq )
 	} else
 		ERROR_WINDOW("Cannot open audio device!");
 	// *** RESET CPU, also fetches the RESET vector into PC
-	cpu_reset();
+	cpu65_reset();
 	DEBUG("INIT: end of initialization!" NL);
 	// *** Snapshot init and loading etc should be the LAST!!!! (at least the load must be last to have initiated machine state, xemusnap_init() can be called earlier too)
 #ifdef XEMU_SNAPSHOT_SUPPORT
 	xemusnap_init(c65_snapshot_definition);
-	p = emucfg_get_str("snapload");
+	p = xemucfg_get_str("snapload");
 	if (p) {
 		if (xemusnap_load(p))
 			FATAL("Couldn't load snapshot \"%s\": %s", p, xemusnap_error_buffer);
 	}
-	c65_snapshot_saver_filename = emucfg_get_str("snapsave");
+	c65_snapshot_saver_filename = xemucfg_get_str("snapsave");
 	atexit(c65_snapshot_saver_on_exit_callback);
 #endif
 }
@@ -362,13 +417,13 @@ static void c65_init ( int sid_cycles_per_sec, int sound_mix_freq )
 
 
 // *** Implements the MAP opcode of 4510, called by the 65CE02 emulator
-void cpu_do_aug ( void )
+void cpu65_do_aug_callback ( void )
 {
-	cpu_inhibit_interrupts = 1;	// disable interrupts to the next "EOM" (ie: NOP) opcode
-	DEBUG("CPU: MAP opcode, input A=$%02X X=$%02X Y=$%02X Z=$%02X" NL, cpu_a, cpu_x, cpu_y, cpu_z);
-	map_offset_low  = (cpu_a << 8) | ((cpu_x & 15) << 16);	// offset of lower half (blocks 0-3)
-	map_offset_high = (cpu_y << 8) | ((cpu_z & 15) << 16);	// offset of higher half (blocks 4-7)
-	map_mask        = (cpu_z & 0xF0) | (cpu_x >> 4);	// "is mapped" mask for blocks (1 bit for each)
+	cpu65.cpu_inhibit_interrupts = 1;	// disable interrupts to the next "EOM" (ie: NOP) opcode
+	DEBUG("CPU: MAP opcode, input A=$%02X X=$%02X Y=$%02X Z=$%02X" NL, cpu65.a, cpu65.x, cpu65.y, cpu65.z);
+	map_offset_low  = (cpu65.a << 8) | ((cpu65.x & 15) << 16);	// offset of lower half (blocks 0-3)
+	map_offset_high = (cpu65.y << 8) | ((cpu65.z & 15) << 16);	// offset of higher half (blocks 4-7)
+	map_mask        = (cpu65.z & 0xF0) | (cpu65.x >> 4);	// "is mapped" mask for blocks (1 bit for each)
 	DEBUG("MEM: applying new memory configuration because of MAP CPU opcode" NL);
 	DEBUG("LOW -OFFSET = $%X" NL, map_offset_low);
 	DEBUG("HIGH-OFFSET = $%X" NL, map_offset_high);
@@ -378,10 +433,10 @@ void cpu_do_aug ( void )
 
 
 // *** Implements the EOM opcode of 4510, called by the 65CE02 emulator
-void cpu_do_nop ( void )
+void cpu65_do_nop_callback ( void )
 {
-	if (cpu_inhibit_interrupts) {
-		cpu_inhibit_interrupts = 0;
+	if (cpu65.cpu_inhibit_interrupts) {
+		cpu65.cpu_inhibit_interrupts = 0;
 		DEBUG("CPU: EOM, interrupts were disabled because of MAP till the EOM" NL);
 	} else
 		DEBUG("CPU: NOP in not treated as EOM (no MAP before)" NL);
@@ -411,7 +466,7 @@ static inline Uint8 read_some_sid_register ( int addr )
 static inline void write_some_sid_register ( int addr, Uint8 data )
 {
 	int instance = (addr >> 6) & 1; // Selects left/right SID based on address
-	DEBUG("SID%d: writing register $%04X ($%04X) with data $%02X @ PC=$%04X" NL, ((addr >> 6) & 1) + 1, addr & 0x1F, addr + 0xD000, data, cpu_pc);
+	DEBUG("SID%d: writing register $%04X ($%04X) with data $%02X @ PC=$%04X" NL, ((addr >> 6) & 1) + 1, addr & 0x1F, addr + 0xD000, data, cpu65.pc);
 	sid_write_reg(&sids[instance], addr & 0x1F, data);
 }
 
@@ -447,7 +502,7 @@ Uint8 io_read ( int addr )
 			return vic3_registers[0x30] & 1 ? memory[0x1F000 + addr] : 0xFF;	// I/O exp area is not emulated by Xemu, gives $FF on reads
 		/* --- I/O read in new VIC I/O mode --- */
 		case 0x10:	// $D000-$D0FF
-			if (likely(addr < 0x80))
+			if (XEMU_LIKELY(addr < 0x80))
 				return vic3_read_reg(addr);
 			if (addr < 0xA0)
 				return fdc_read_reg(addr & 0xF);
@@ -464,6 +519,7 @@ Uint8 io_read ( int addr )
 		case 0x15:	// $D500-$D5FF
 			return read_some_sid_register(addr);
 		case 0x16:	// $D600-$D6FF, C65 UART
+			//DEBUGPRINT("READ  D%03X" NL, addr);
 			return 0xFF;			// not emulated by Xemu, yet, TODO
 		case 0x17:	// $D700-$D7FF, C65 DMA
 			return dma_read_reg(addr & 15);
@@ -533,7 +589,7 @@ void io_write ( int addr, Uint8 data )
 			return;
 		/* --- I/O write in new VIC I/O mode --- */
 		case 0x10:	// $D000-$D0FF
-			if (likely(addr < 0x80)) {
+			if (XEMU_LIKELY(addr < 0x80)) {
 				vic3_write_reg(addr, data);
 				return;
 			}
@@ -560,6 +616,10 @@ void io_write ( int addr, Uint8 data )
 			write_some_sid_register(addr, data);
 			return;
 		case 0x16:	// $D600-$D6FF, C65 UART
+			if (addr == 0x607) {
+				port_d607 = data;
+			}
+			//DEBUGPRINT("WRITE D%03X with data %02X" NL, addr, data);
 			return;				// not emulated by Xemu, yet, TODO
 		case 0x17:	// $D700-$D7FF, C65 DMA
 			dma_write_reg(addr & 15, data);
@@ -598,7 +658,7 @@ void io_write ( int addr, Uint8 data )
 void write_phys_mem ( int addr, Uint8 data )
 {
 	addr &= 0xFFFFF;
-	if (unlikely(addr < 2)) {	// "CPU port" at memory addr 0/1
+	if (XEMU_UNLIKELY(addr < 2)) {	// "CPU port" at memory addr 0/1
 		if ((memory[addr] & 7) != (data & 7)) {
 			memory[addr] = data;
 			DEBUG("MEM: applying new memory configuration because of CPU port writing" NL);
@@ -606,7 +666,7 @@ void write_phys_mem ( int addr, Uint8 data )
 		} else
 			memory[addr] = data;
 	} else if (
-		(likely(addr < 0x20000))
+		(XEMU_LIKELY(addr < 0x20000))
 #if defined(ALLOW_256K_RAMEXP) && defined(ALLOW_512K_RAMEXP)
 		|| (addr >= 0x40000)
 #else
@@ -622,6 +682,14 @@ void write_phys_mem ( int addr, Uint8 data )
 }
 
 
+void write_phys_mem_for_dma ( int addr, Uint8 data )
+{
+	if (XEMU_LIKELY(addr <= 0xFFFFF))
+		write_phys_mem(addr, data);
+	else
+		DEBUG("DMA-C65-BACKEND: writing memory above 1Mbyte (addr=$%X,data=%02X) PC=%04X" NL, addr, data, cpu65.pc);
+}
+
 
 Uint8 read_phys_mem ( int addr )
 {
@@ -629,12 +697,23 @@ Uint8 read_phys_mem ( int addr )
 }
 
 
+Uint8 read_phys_mem_for_dma ( int addr )
+{
+	if (XEMU_LIKELY(addr <= 0xFFFFF))
+		return memory[addr & 0xFFFFF];
+	else {
+		DEBUG("DMA-C65-BACKEND: reading memory above 1Mbyte (addr=$%X) PC=%04X" NL, addr, cpu65.pc);
+		return 0xFF;
+	}
+}
+
+
 
 // This function is called by the 65CE02 emulator in case of reading a byte (regardless of data or code)
-Uint8 cpu_read ( Uint16 addr )
+Uint8 cpu65_read_callback ( Uint16 addr )
 {
 	register int phys_addr = addr_trans_rd[addr >> 12] + addr;	// translating address with the READ table created by apply_memory_config()
-	if (likely(phys_addr < 0x10FF00))
+	if (XEMU_LIKELY(phys_addr < 0x10FF00))
 		return memory[phys_addr & 0xFFFFF];	// light optimization, do not call read_phys_mem for this single stuff :)
 	else
 		return io_read(phys_addr);
@@ -643,10 +722,10 @@ Uint8 cpu_read ( Uint16 addr )
 
 
 // This function is called by the 65CE02 emulator in case of writing a byte
-void cpu_write ( Uint16 addr, Uint8 data )
+void cpu65_write_callback ( Uint16 addr, Uint8 data )
 {
 	register int phys_addr = addr_trans_wr[addr >> 12] + addr;	// translating address with the WRITE table created by apply_memory_config()
-	if (likely(phys_addr < 0x10FF00))
+	if (XEMU_LIKELY(phys_addr < 0x10FF00))
 		write_phys_mem(phys_addr, data);
 	else
 		io_write(phys_addr, data);
@@ -661,10 +740,10 @@ void cpu_write ( Uint16 addr, Uint8 data )
 // However this leads to incompatibilities, as some software used the RMW behavour by intent.
 // Thus Mega65 fixed the problem to "restore" the old way of RMW behaviour.
 // I also follow this path here, even if it's *NOT* what 65CE02 would do actually!
-void cpu_write_rmw ( Uint16 addr, Uint8 old_data, Uint8 new_data )
+void cpu65_write_rmw_callback ( Uint16 addr, Uint8 old_data, Uint8 new_data )
 {
 	int phys_addr = addr_trans_wr[addr >> 12] + addr;	// translating address with the WRITE table created by apply_memory_config()
-	if (likely(phys_addr < 0x10FF00))
+	if (XEMU_LIKELY(phys_addr < 0x10FF00))
 		write_phys_mem(phys_addr, new_data);	// "normal" memory, just write once, no need to emulate the behaviour
 	else {
 		DEBUG("CPU: RMW opcode is used on I/O area for $%04X" NL, addr);
@@ -695,7 +774,7 @@ static void shutdown_callback ( void )
 	}
 #endif
 	printf("Scanline render info = \"%s\"" NL, scanline_render_debug_info);
-	DEBUG("Execution has been stopped at PC=$%04X [$%05X]" NL, cpu_pc, addr_trans_rd[cpu_pc >> 12] + cpu_pc);
+	DEBUG("Execution has been stopped at PC=$%04X [$%05X]" NL, cpu65.pc, addr_trans_rd[cpu65.pc >> 12] + cpu65.pc);
 }
 
 
@@ -705,7 +784,7 @@ static void c65_reset ( void )
 	map_mask = 0;
 	vic3_registers[0x30] = 0;
 	apply_memory_config();
-	cpu_reset();
+	cpu65_reset();
 	dma_reset();
 	nmi_level = 0;
 	DEBUG("RESET!" NL);
@@ -719,60 +798,113 @@ int emu_callback_key ( int pos, SDL_Scancode key, int pressed, int handled )
 	if (pressed) {
 		if (key == SDL_SCANCODE_F10) {	// reset
 			c65_reset();
-		} else if (key == SDL_SCANCODE_KP_ENTER)
+		} else if (key == SDL_SCANCODE_KP_ENTER) {
 			c64_toggle_joy_emu();
-		else if (key == SDL_SCANCODE_ESCAPE)
-			set_mouse_grab(SDL_FALSE);
-	} else
-		if (pos == -2 && key == 0) {	// special case pos = -2, key = 0, handled = mouse button (which?) and release event!
-			if (handled == SDL_BUTTON_LEFT) {
-				OSD(-1, -1, "Mouse grab activated.\nPress ESC to cancel.");
-				set_mouse_grab(SDL_TRUE);
+		} else if (key == SDL_SCANCODE_LSHIFT) {
+			shift_status |= 1;
+		} else if (key == SDL_SCANCODE_RSHIFT) {
+			shift_status |= 2;
+		}
+		if (shift_status == 3 && set_mouse_grab(SDL_FALSE)) {
+			DEBUGPRINT("UI: mouse grab cancelled" NL);
+		}
+	} else {
+		if (key == SDL_SCANCODE_LSHIFT) {
+			shift_status &= 2;
+		} else if (key == SDL_SCANCODE_RSHIFT) {
+			shift_status &= 1;
+		} else if (pos == -2 && key == 0) {	// special case pos = -2, key = 0, handled = mouse button (which?) and release event!
+			if (handled == SDL_BUTTON_LEFT && set_mouse_grab(SDL_TRUE)) {
+				OSD(-1, -1, "Mouse grab activated. Press\nboth SHIFTs together to cancel.");
+				DEBUGPRINT("UI: mouse grab activated" NL);
 			}
 		}
+	}
 	return 0;
 }
 
 
 static void update_emulator ( void )
 {
-	emu_update_screen();
+	xemu_update_screen();
 	hid_handle_all_sdl_events();
 	nmi_set(IS_RESTORE_PRESSED(), 2); // Custom handling of the restore key ...
-	emu_timekeeping_delay(40000);
+	xemu_timekeeping_delay(40000);
 	// Ugly CIA trick to maintain realtime TOD in CIAs :)
 	if (seconds_timer_trigger) {
-		struct tm *t = emu_get_localtime();
+		struct tm *t = xemu_get_localtime();
 		cia_ugly_tod_updater(&cia1, t);
 		cia_ugly_tod_updater(&cia2, t);
 	}
 }
 
 
+static int cycles;
+
+
+static void emulation_loop ( void )
+{
+	vic3_open_frame_access();
+	for (;;) {
+		cycles += XEMU_UNLIKELY(dma_status) ? dma_update_multi_steps(cpu_cycles_per_scanline) : cpu65_step(
+#ifdef CPU_STEP_MULTI_OPS
+			cpu_cycles_per_scanline
+#endif
+		);	// FIXME: this is maybe not correct, that DMA's speed depends on the fast/slow clock as well?
+		if (cycles >= cpu_cycles_per_scanline) {
+			int exit_loop = 0;
+			cia_tick(&cia1, 64);
+			cia_tick(&cia2, 64);
+			cycles -= cpu_cycles_per_scanline;
+			if (vic3_render_scanline()) {
+				if (frameskip) {
+					frameskip = 0;
+					hostfs_flush_all();
+				} else {
+					frameskip = 1;
+					update_emulator();
+					//vic3_open_frame_access();
+					exit_loop = 1;
+				}
+				sids[0].sFrameCount++;
+				sids[1].sFrameCount++;
+			}
+			vic3_check_raster_interrupt();
+			if (exit_loop)
+				return;
+		}
+	}
+}
 
 
 
 int main ( int argc, char **argv )
 {
-	int cycles;
-	xemu_dump_version(stdout, "The Unusable Commodore 65 emulator from LGB");
-	emucfg_define_str_option("8", NULL, "Path of the D81 disk image to be attached");
-	emucfg_define_num_option("dmarev", 0, "Revision of the DMAgic chip (0=F018A, other=F018B)");
-	emucfg_define_switch_option("fullscreen", "Start in fullscreen mode");
-	emucfg_define_str_option("hostfsdir", NULL, "Path of the directory to be used as Host-FS base");
-	//emucfg_define_switch_option("noaudio", "Disable audio");
-	emucfg_define_str_option("rom", "c65-system.rom", "Override system ROM path to be loaded");
-#ifdef XEMU_SNAPSHOT_SUPPORT
-	emucfg_define_str_option("snapload", NULL, "Load a snapshot from the given file");
-	emucfg_define_str_option("snapsave", NULL, "Save a snapshot into the given file before Xemu would exit");
+	//int cycles;
+	xemu_pre_init(APP_ORG, TARGET_NAME, "The Unusable Commodore 65 emulator from LGB");
+	xemucfg_define_str_option("8", NULL, "Path of the D81 disk image to be attached");
+	xemucfg_define_switch_option("d81ro", "Force read-only status for image specified with -8 option");
+	xemucfg_define_num_option("dmarev", 2, "Revision of the DMAgic chip (0/1=F018A/B, 2=rom_auto, +512=modulo))");
+	xemucfg_define_switch_option("fullscreen", "Start in fullscreen mode");
+	xemucfg_define_str_option("hostfsdir", NULL, "Path of the directory to be used as Host-FS base");
+	//xemucfg_define_switch_option("noaudio", "Disable audio");
+	xemucfg_define_str_option("rom", "#c65-system.rom", "Override system ROM path to be loaded");
+	xemucfg_define_str_option("keymap", KEYMAP_USER_FILENAME, "Set keymap configuration file to be used");
+#ifdef FAKE_TYPING_SUPPORT
+	xemucfg_define_switch_option("go64", "Go into C64 mode after start");
+	xemucfg_define_switch_option("autoload", "Load and start the first program from disk");
 #endif
-	if (emucfg_parse_commandline(argc, argv, NULL))
+#ifdef XEMU_SNAPSHOT_SUPPORT
+	xemucfg_define_str_option("snapload", NULL, "Load a snapshot from the given file");
+	xemucfg_define_str_option("snapsave", NULL, "Save a snapshot into the given file before Xemu would exit");
+#endif
+	xemucfg_define_switch_option("syscon", "Keep system console open (Windows-specific effect only)");
+	if (xemucfg_parse_all(argc, argv))
 		return 1;
 	/* Initiailize SDL - note, it must be before loading ROMs, as it depends on path info from SDL! */
 	window_title_info_addon = emulator_speed_title;
-        if (emu_init_sdl(
+        if (xemu_post_init(
 		TARGET_DESC APP_DESC_APPEND,	// window title
-		APP_ORG, TARGET_NAME,		// app organization and name, used with SDL pref dir formation
 		1,				// resizable window
 		SCREEN_WIDTH, SCREEN_HEIGHT,	// texture sizes
 		SCREEN_WIDTH, SCREEN_HEIGHT * 2,// logical size (used with keeping aspect ratio by the SDL render stuffs)
@@ -793,37 +925,23 @@ int main ( int argc, char **argv )
 	);
 	osd_init_with_defaults();
 	// Start!!
+#ifdef FAKE_TYPING_SUPPORT
+	if (xemucfg_get_bool("go64")) {
+		if (xemucfg_get_bool("autoload"))
+			c64_register_fake_typing(fake_typing_for_load64);
+		else
+			c64_register_fake_typing(fake_typing_for_go64);
+	} else if (xemucfg_get_bool("autoload"))
+		c64_register_fake_typing(fake_typing_for_load65);
+#endif
 	cycles = 0;
 	if (audio)
 		SDL_PauseAudioDevice(audio, 0);
-	emu_set_full_screen(emucfg_get_bool("fullscreen"));
-	vic3_open_frame_access();
-	emu_timekeeping_start();
-	for (;;) {
-		cycles += unlikely(dma_status) ? dma_update_multi_steps(cpu_cycles_per_scanline) : cpu_step(
-#ifdef CPU_STEP_MULTI_OPS
-			cpu_cycles_per_scanline
-#endif
-		);	// FIXME: this is maybe not correct, that DMA's speed depends on the fast/slow clock as well?
-		if (cycles >= cpu_cycles_per_scanline) {
-			cia_tick(&cia1, 64);
-			cia_tick(&cia2, 64);
-			cycles -= cpu_cycles_per_scanline;
-			if (vic3_render_scanline()) {
-				if (frameskip) {
-					frameskip = 0;
-					hostfs_flush_all();
-				} else {
-					frameskip = 1;
-					update_emulator();
-					vic3_open_frame_access();
-				}
-				sids[0].sFrameCount++;
-				sids[1].sFrameCount++;
-			}
-			vic3_check_raster_interrupt();
-		}
-	}
+	xemu_set_full_screen(xemucfg_get_bool("fullscreen"));
+	if (!xemucfg_get_bool("syscon"))
+		sysconsole_close(NULL);
+	xemu_timekeeping_start();
+	XEMU_MAIN_LOOP(emulation_loop, 25, 1);
 	return 0;
 }
 
@@ -849,7 +967,7 @@ int c65emu_snapshot_load_state ( const struct xemu_snapshot_definition_st *def, 
 	map_mask = (int)P_AS_BE32(buffer + 0);
 	map_offset_low = (int)P_AS_BE32(buffer + 4);
 	map_offset_high = (int)P_AS_BE32(buffer + 8);
-	cpu_inhibit_interrupts = (int)P_AS_BE32(buffer + 12);
+	cpu65.cpu_inhibit_interrupts = (int)P_AS_BE32(buffer + 12);
 	return 0;
 }
 
@@ -864,7 +982,7 @@ int c65emu_snapshot_save_state ( const struct xemu_snapshot_definition_st *def )
 	U32_AS_BE(buffer +  0, map_mask);
 	U32_AS_BE(buffer +  4, map_offset_low);
 	U32_AS_BE(buffer +  8, map_offset_high);
-	U32_AS_BE(buffer + 12, cpu_inhibit_interrupts);
+	U32_AS_BE(buffer + 12, cpu65.cpu_inhibit_interrupts);
 	return xemusnap_write_sub_block(buffer, sizeof buffer);
 }
 

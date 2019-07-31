@@ -1,7 +1,7 @@
 /* Test-case for a very simple and inaccurate Videoton TV computer
    (a Z80 based 8 bit computer) emulator using SDL2 library.
 
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
    This emulator is HIGHLY inaccurate and unusable.
 
@@ -20,6 +20,7 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 #include "xemu/emutools.h"
+#include "xemu/emutools_files.h"
 #include "xemu/emutools_hid.h"
 #include "xemu/emutools_config.h"
 #include "xemu/z80.h"
@@ -30,7 +31,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #define CLOCKS_PER_FRAME (CPU_CLOCK / 50)
 #define VIRTUAL_SHIFT_POS 0x63
 
-extern const struct KeyMapping tvc_key_map[];
+extern const struct KeyMappingDefault tvc_key_map[];
 
 // The Z80 emulation context itself
 Z80EX_CONTEXT z80ex;
@@ -50,8 +51,8 @@ static struct {
 	Uint8 *vmem;
 	Uint8 user_ram [0x10000];
 	Uint8 video_ram[0x10000];
-	Uint8 sys_rom  [0x04000 + 1];
-	Uint8 ext_rom  [0x04000 + 1];	// the first 8K is not used from this, currently ...
+	Uint8 sys_rom  [0x04000];
+	Uint8 ext_rom  [0x04000];	// the first 8K is not used from this, currently ...
 } mem;
 
 // CRTC "internal" related stuffs
@@ -78,7 +79,7 @@ static int frameskip = 0;
 
 
 
-static INLINE Uint32 TVC_COLOUR_BYTE_TO_SDL ( Uint8 c )
+static XEMU_INLINE Uint32 TVC_COLOUR_BYTE_TO_SDL ( Uint8 c )
 {
 	return tvc_palette_rgb[(c & 1) | ((c >> 1) & 2) | ((c >> 2) & 4) | ((c >> 3) & 8)];
 }
@@ -86,7 +87,7 @@ static INLINE Uint32 TVC_COLOUR_BYTE_TO_SDL ( Uint8 c )
 
 static void crtc_write_register ( int reg, Uint8 data )
 {
-	if (likely(reg < 16)) {
+	if (XEMU_LIKELY(reg < 16)) {
 		data &= crtc_write_masks[reg];	// this will chop unused bits off for the given register
 		DEBUG("CRTC: register %02Xh is written with data %02Xh" NL, reg, data);
 		crtc.registers[reg] = data;
@@ -96,7 +97,7 @@ static void crtc_write_register ( int reg, Uint8 data )
 
 static Uint8 crtc_read_register ( int reg )
 {
-	if (likely(reg >= 12 && reg <= 17))
+	if (XEMU_LIKELY(reg >= 12 && reg <= 17))
 		return crtc.registers[reg];
 	return 0xFF;
 }
@@ -260,7 +261,7 @@ void clear_emu_events ( void )
 static inline void render_tvc_screen ( void )
 {
 	int tail, y;
-	Uint32 *pix = emu_start_pixel_buffer_access(&tail);
+	Uint32 *pix = xemu_start_pixel_buffer_access(&tail);
 	int ma = (crtc.registers[12] << 8) | crtc.registers[13];	// CRTC MA signals, 14 bit
 	int ra = 0;	// CRTC RA signals
 	int start_line, limit_line, start_cpos, limit_cpos;
@@ -314,7 +315,7 @@ static inline void render_tvc_screen ( void )
 				*pix++ = border_colour;
 		pix += tail;
 	}
-	emu_update_screen();
+	xemu_update_screen();
 }
 
 
@@ -341,7 +342,7 @@ static void update_emulator ( void )
 	if (!frameskip) {
 		render_tvc_screen();
 		hid_handle_all_sdl_events();
-		emu_timekeeping_delay(40000);	// number: the time needed (real-time) for a "full frame"
+		xemu_timekeeping_delay(40000);	// number: the time needed (real-time) for a "full frame"
 	}
 }
 
@@ -376,34 +377,57 @@ static void init_tvc ( void )
 		z80ex_pwrite_cb(a, 0);
 	for (a = 0; a < sizeof crtc.registers; a++)
 		crtc_write_register(a, 0);
-	if (emu_load_file("tvc22_d6_64k.rom", mem.sys_rom + 0x0000, 0x2001) != 0x2000 ||
-	    emu_load_file("tvc22_d4_64k.rom", mem.sys_rom + 0x2000, 0x2001) != 0x2000 ||
-	    emu_load_file("tvc22_d7_64k.rom", mem.ext_rom + 0x2000, 0x2001) != 0x2000
+	if (xemu_load_file("#tvc22_d6_64k.rom", mem.sys_rom + 0x0000, 0x2000, 0x2000, NULL) < 0 ||
+	    xemu_load_file("#tvc22_d4_64k.rom", mem.sys_rom + 0x2000, 0x2000, 0x2000, NULL) < 0 ||
+	    xemu_load_file("#tvc22_d7_64k.rom", mem.ext_rom + 0x2000, 0x2000, 0x2000, NULL) < 0
 	)
 		FATAL("Cannot load ROM(s).");
 #ifdef CONFIG_SDEXT_SUPPORT
-	if (emucfg_get_bool("sdext"))
-		sdext_init();
+	if (xemucfg_get_bool("sdext"))
+		sdext_init(xemucfg_get_str("sdimg"), xemucfg_get_str("sdrom"));
 #endif
 }
 
+
+static int cycles;
+
+
+static void emulation_loop ( void )
+{
+	for (;;) { // our emulation loop ...
+		if (interrupt_active) {
+			int a = z80ex_int();
+			if (a)
+				cycles += a;
+			else
+				cycles += z80ex_step();
+		} else
+			cycles += z80ex_step();
+		if (cycles >= CLOCKS_PER_FRAME) {
+			update_emulator();
+			frameskip = !frameskip;
+			cycles -= CLOCKS_PER_FRAME;
+			return;
+		}
+	}
+}
 
 
 
 int main ( int argc, char **argv )
 {
-	int cycles;
-	xemu_dump_version(stdout, "The Careless Videoton TV Computer emulator from LGB");
+	xemu_pre_init(APP_ORG, TARGET_NAME, "The Careless Videoton TV Computer emulator from LGB");
 #ifdef CONFIG_SDEXT_SUPPORT
-	emucfg_define_switch_option("sdext", "Enables SD-ext");
-	emucfg_define_str_option("sdimg", SDCARD_IMG_FN, "SD-card image filename / path");
+	xemucfg_define_switch_option("sdext", "Enables SD-ext");
+	xemucfg_define_str_option("sdimg", "@sdcard.img", "SD-card image filename / path");
+	xemucfg_define_str_option("sdrom", "#tvc_sddos.rom", "SD-card cartridge ROM image path");
 #endif
-	if (emucfg_parse_commandline(argc, argv, NULL))
+	xemucfg_define_switch_option("syscon", "Keep system console open (Windows-specific effect only)");
+	if (xemucfg_parse_all(argc, argv))
 		return 1;
 	/* Initiailize SDL - note, it must be before loading ROMs, as it depends on path info from SDL! */
-	if (emu_init_sdl(
+	if (xemu_post_init(
 		TARGET_DESC APP_DESC_APPEND,	// window title
-		APP_ORG, TARGET_NAME,		// app organization and name, used with SDL pref dir formation
 		1,				// resizable window
 		SCREEN_WIDTH, SCREEN_HEIGHT,	// texture sizes
 		SCREEN_WIDTH, SCREEN_HEIGHT * 2,	// logical size (width is doubled for somewhat correct aspect ratio)
@@ -428,21 +452,9 @@ int main ( int argc, char **argv )
 	z80ex_init();
 	cycles = 0;
 	interrupt_active = 0;
-	emu_timekeeping_start();	// we must call this once, right before the start of the emulation
-	for (;;) { // our emulation loop ...
-		if (interrupt_active) {
-			int a = z80ex_int();
-			if (a)
-				cycles += a;
-			else
-				cycles += z80ex_step();
-		} else
-			cycles += z80ex_step();
-		if (cycles >= CLOCKS_PER_FRAME) {
-			update_emulator();
-			frameskip = !frameskip;
-			cycles -= CLOCKS_PER_FRAME;
-		}
-	}
+	if (!xemucfg_get_bool("syscon"))
+		sysconsole_close(NULL);
+	xemu_timekeeping_start();	// we must call this once, right before the start of the emulation
+	XEMU_MAIN_LOOP(emulation_loop, 25, 1);
 	return 0;
 }

@@ -1,5 +1,6 @@
-/* Very primitive emulator of Commodore 65 + sub-set (!!) of Mega65 fetures.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+/* A work-in-progess Mega-65 (Commodore-65 clone origins) emulator
+   Part of the Xemu project, please visit: https://github.com/lgblgblgb/xemu
+   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -24,8 +25,10 @@ int  umon_send_ok;
 char umon_write_buffer[UMON_WRITE_BUFFER_SIZE];
 
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__EMSCRIPTEN__)
+#warning "Platform does not support UMON"
 // Windows is not supported currently, as it does not have POSIX-standard socket interface (?).
+// Also, it's pointless for emscripten, for sure.
 int  uartmon_init   ( const char *fn ) { return 1; }
 void uartmon_update ( void ) {}
 void uartmon_close  ( void ) {}
@@ -101,6 +104,34 @@ static int check_end_of_command ( char *p, int error_out )
 }
 
 
+static void setmem28(char *param, int addr)
+{
+	addr &= 0xFFFFFFF;
+  Uint8* vals = NULL;
+  char* orig_param = param;
+  int cnt = 0;
+  int val;
+
+  // get param count
+  while (param && !check_end_of_command(param, 0))
+  {
+    param = parse_hex_arg(param, &val, 0, 0xFF); 
+    cnt++;
+  }
+
+  vals = calloc(cnt, sizeof(Uint8));
+  param = orig_param;
+
+  int idx = 0;
+  while (param && !check_end_of_command(param, 0))
+  {
+    param = parse_hex_arg(param, &val, 0, 0xFF);
+    vals[idx++] = (Uint8)val;
+  }
+
+  m65mon_setmem28(addr, cnt, vals);
+  free(vals);
+}
 
 static void execute_command ( char *cmd )
 {
@@ -139,6 +170,15 @@ static void execute_command ( char *cmd )
 			if (cmd && check_end_of_command(cmd, 1))
 				m65mon_dumpmem16(par1);
 			break;
+		case 'm':
+			cmd = parse_hex_arg(cmd, &par1, 0, 0xFFFFFFF);
+			if (cmd && check_end_of_command(cmd, 1))
+				m65mon_dumpmem28(par1);
+			break;
+    case 's':
+      cmd = parse_hex_arg(cmd, &par1, 0, 0xFFFFFFF);
+      setmem28(cmd, par1);
+      break;
 		case 't':
 			if (!*cmd)
 				m65mon_do_trace();
@@ -194,7 +234,7 @@ int uartmon_init ( const char *fn )
 	}
 	sock_st.sun_family = AF_UNIX;
 	strcpy(sock_st.sun_path, fn);
-        unlink(sock_st.sun_path);
+	unlink(sock_st.sun_path);
 	if (bind(sock, (struct sockaddr*)&sock_st, sizeof(struct sockaddr_un))) {
 		ERROR_WINDOW("Cannot bind named socket %s, UART monitor cannot be used: %s\n", fn, strerror(errno));
 		close(sock);
@@ -276,7 +316,7 @@ void uartmon_update ( void )
 				// Reset reading/writing information
 				umon_write_size = 0;
 				umon_read_pos = 0;
-				fprintf(stderr, "UARTMON: new connection established on socket %d" NL, sock_client);
+				DEBUGPRINT("UARTMON: new connection established on socket %d" NL, sock_client);
 			}
 		}
 	}
@@ -296,7 +336,7 @@ void uartmon_update ( void )
 		if (ret == 0) { // client socket closed
 			close(sock_client);
 			sock_client = -1;
-			fprintf(stderr, "UARTMON: connection closed by peer while writing" NL);
+			DEBUGPRINT("UARTMON: connection closed by peer while writing" NL);
 			return;
 		}
 		if (ret > 0) {
@@ -320,7 +360,7 @@ void uartmon_update ( void )
 	if (ret == 0) { // client socket closed
 		close(sock_client);
 		sock_client = -1;
-		fprintf(stderr, "UARTMON: connection closed by peer while reading" NL);
+		DEBUGPRINT("UARTMON: connection closed by peer while reading" NL);
 		return;
 	}
 	if (ret > 0) {

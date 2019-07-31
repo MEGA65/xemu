@@ -4,6 +4,10 @@
 ; There should be *NO* empty "COMMAND-TO-EXECUTE", it should be
 ; not present then, or "commented out".
 
+; First some special values only used with win32/win64 DLL ...
+win32#sdl2#dll#			echo "`$SDL2_CONFIG_WIN32 --prefix`/$SDL2_DLL_RELPATH"
+win64#sdl2#dll#			echo "`$SDL2_CONFIG_WIN64 --prefix`/$SDL2_DLL_RELPATH"
+
 native#sdl2#cflags#		$SDL2_CONFIG_NATIVE --cflags && echo " -D HAVE_SDL2"
 native#sdl2#ldflags#		$SDL2_CONFIG_NATIVE --libs
 osx#sdl2#cflags#		$SDL2_CONFIG_OSX    --cflags && echo " -D HAVE_SDL2"
@@ -47,3 +51,14 @@ osx#readline#ldflags#		echo " -lreadline"
 ;win64#readline#ldflags#
 ;html#readline#cflags#
 ;html#readline#ldflags#
+
+native#socketapi#cflags#	echo " -D HAVE_SOCKET_OS_API"
+;native#socketapi#ldflags#
+osx#socketapi#cflags#		echo " -D HAVE_SOCKET_OS_API"
+;osx#socketapi#ldflags#
+win32#socketapi#cflags#		echo " -D HAVE_SOCKET_OS_API"
+win32#socketapi#ldflags#	echo " -lwsock32"
+win64#socketapi#cflags#		echo " -D HAVE_SOCKET_OS_API"
+win64#socketapi#ldflags#	echo " -lwsock32"
+;html#socketapi#cflags#
+;html#socketapi#ldflags#

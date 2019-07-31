@@ -1,6 +1,6 @@
 /* Test-case for a very simple, inaccurate, work-in-progress Commodore 65 / Mega-65 emulator,
    within the Xemu project. F011 FDC core implementation.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016,2018 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -26,11 +26,14 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 #include "xemu/emutools.h"
 #include "xemu/f011_core.h"
-#include "xemu/cpu65c02.h"
+#include "xemu/cpu65.h"
+
+
 
 
 
 // #define DEBUG_FOR_PAUL
+// #define SOME_DEBUG
 
 
 static Uint8 head_track;		// "physical" track, ie, what is the head is positioned at currently
@@ -39,10 +42,10 @@ static Uint8 track, sector, side;	// parameters given for an operation ("find"),
 static Uint8 control, status_a, status_b;
 static Uint8 cmd;
 static int   curcmd;
-static Uint8 clock, step;
+static Uint8 dskclock, step;
 static int   emulate_busy;
 static int   drive;
-static Uint8 cache[512];		// 512 bytes cache FDC will use. This is a real 512byte RAM attached to the FDC controller for buffered operations on the C65
+static Uint8 *cache;			// 512 bytes cache FDC will use. This is a real 512byte RAM attached to the FDC controller for buffered operations on the C65
 static int   cache_p_cpu;		// cache pointer if CPU accesses the FDC buffer cache. 0 ... 511!
 static int   cache_p_fdc;		// cache pointer if FDC accesses the FDC buffer cache. 0 ... 511!
 //static int   disk_fd;			// disk image file descriptor (if disk_fd < 0 ----> no disk image, ie "no disk inserted" is emulated)
@@ -57,9 +60,10 @@ static int   have_disk, have_write;
 
 
 
-void fdc_init ( void )
+void fdc_init ( Uint8 *cache_set )
 {
 	DEBUG("FDC: init F011 emulation core" NL);
+	cache = cache_set;
 	head_track = 0;
 	head_side = 0;
 	control = 0;
@@ -70,7 +74,7 @@ void fdc_init ( void )
 	side = 0;
 	cmd = 0;
 	curcmd = -1;
-	clock = 0xFF;
+	dskclock = 0xFF;
 	step = 0xFF;
 	cache_p_cpu = 0;
 	cache_p_fdc = 0;
@@ -104,7 +108,7 @@ void fdc_set_disk ( int in_have_disk, int in_have_write )
 static int calc_offset ( const char *opdesc )
 {
 	int offset;
-	DEBUG("FDC: %s sector track=%d sector=%d side=%d @ PC=$%04X" NL, opdesc, track, sector, side, cpu_old_pc);
+	DEBUG("FDC: %s sector track=%d sector=%d side=%d @ PC=$%04X" NL, opdesc, track, sector, side, cpu65.old_pc);
 	// FIXME: no checking of input parameters, can be insane values
 	// FIXME: no check for desired track/side and the currently selected/seeked, what should be!
 	// FIXME: whatever :)
@@ -280,7 +284,7 @@ void fdc_write_reg ( int addr, Uint8 data )
 			break;
 		// TODO: write DATA register (7) [only for writing it is needed anyway]
 		case 8:
-			clock = data;
+			dskclock = data;
 			break;
 		case 9:
 			step = data;
@@ -313,7 +317,9 @@ static void execute_command ( void )
 		return;	// no cmd was given?!
 	if (curcmd > 0xFF)
 		return; // only control register was written, not the command register
+#ifdef SOME_DEBUG
 	printf("Command: $%02X" NL, cmd);
+#endif
 	switch (cmd & 0xF8) {	// high 5 bits of the command ...
 		case 0x40:	// read sector
 			//status_a |= 16;		// record not found for testing ...
@@ -326,7 +332,9 @@ static void execute_command ( void )
 			read_sector();
 			//cache_p_drive = (cache_p_drive + BLOCK_SIZE) & 511;
 			//////////////cache_p_cpu = 0; // yayy .... If it's not here we can't get READY. prompt!!
+#ifdef SOME_DEBUG
 			printf("READ: cache_p_cpu=%d / cache_p_fdc=%d drive_selected=%d" NL, cache_p_cpu, cache_p_fdc, drive);
+#endif
 			DEBUG("FDC: READ: head_track=%d need_track=%d head_side=%d need_side=%d need_sector=%d drive_selected=%d" NL,
 				head_track, track, head_side, side, sector, drive
 			);
@@ -336,12 +344,17 @@ static void execute_command ( void )
 				status_a |= 64;         // set DRQ
 				status_a &= (255 - 32); // clear EQ
 				write_sector();
+#ifdef SOME_DEBUG
 				printf("WRITE: cache_p_cpu=%d / cache_p_fdc=%d drive_selected=%d" NL, cache_p_cpu, cache_p_fdc, drive);
+#endif
 				DEBUG("FDC: WRITE: head_track=%d need_track=%d head_side=%d need_side=%d need_sector=%d drive_selected=%d" NL,
                                 	head_track, track, head_side, side, sector, drive
                         	);
-			} else
+			} else {
+#ifdef SOME_DEBUG
 				printf("Sorry, write protected stuff ..." NL);
+#endif
+			}
 			break;
 		case 0x10:	// head step out or no step
 			if (!(cmd & 4)) {	// if only not TIME operation, which does not step!
@@ -367,7 +380,9 @@ static void execute_command ( void )
 			// It seems C65 DOS uses this, without this, the pointer maintaince is bad, and soon it will freeze on EQ check somewhere!
 			// That's why I had to introduce some odd workarounds to reset pointers etc manually, which is NOT what F011 would do, I guess!
 			if (cmd & 1) {
+#ifdef SOME_DEBUG
 				printf("BEFORE pointer reset: cache_p_cpu=%d cache_p_fdc=%d" NL, cache_p_cpu, cache_p_fdc);
+#endif
 				cache_p_cpu = 0;
 				cache_p_fdc = 0;
 				DEBUG("FDC: WARN: resetting cache pointers" NL);
@@ -406,7 +421,9 @@ Uint8 fdc_read_reg  ( int addr )
 		if (emulate_busy > 0)
 			emulate_busy--;
 		if (emulate_busy <= 0) {
+#ifdef SOME_DEBUG
 			printf("Delayed command execution!!!" NL);
+#endif
 			execute_command();	// execute the command only now for real ... (it will also turn BUSY flag - bit 7 - OFF in status_a)
 		}
 	}
@@ -450,7 +467,7 @@ Uint8 fdc_read_reg  ( int addr )
 				status_a &= ~32;	// turn EQ off
 			break;
 		case 8:
-			result = clock;
+			result = dskclock;
 			break;
 		case 9:
 			result = step;
@@ -478,7 +495,13 @@ Uint8 fdc_read_reg  ( int addr )
 #include <string.h>
 
 #define SNAPSHOT_FDC_BLOCK_VERSION	0
-#define SNAPSHOT_FDC_BLOCK_SIZE		(0x100 + sizeof(cache))
+
+#ifdef MEGA65
+#define SNAPSHOT_FDC_BLOCK_SIZE		0x100
+#else
+#define CACHE_SIZE 512
+#define SNAPSHOT_FDC_BLOCK_SIZE		(0x100 + CACHE_SIZE)
+#endif
 
 int fdc_snapshot_load_state ( const struct xemu_snapshot_definition_st *def, struct xemu_snapshot_block_st *block )
 {
@@ -506,9 +529,11 @@ int fdc_snapshot_load_state ( const struct xemu_snapshot_definition_st *def, str
 	status_a = buffer[133];
 	status_b = buffer[134];
 	cmd = buffer[135];
-	clock = buffer[136];
+	dskclock = buffer[136];
 	step = buffer[137];
-	memcpy(cache, buffer + 0x100, sizeof cache);
+#ifndef MEGA65
+	memcpy(cache, buffer + 0x100, CACHE_SIZE);
+#endif
 	return 0;
 }
 
@@ -537,9 +562,11 @@ int fdc_snapshot_save_state ( const struct xemu_snapshot_definition_st *def )
 	buffer[133] = status_a;
 	buffer[134] = status_b;
 	buffer[135] = cmd;
-	buffer[136] = clock;
+	buffer[136] = dskclock;
 	buffer[137] = step;
-	memcpy(buffer + 0x100, cache, sizeof cache);
+#ifndef MEGA65
+	memcpy(buffer + 0x100, cache, CACHE_SIZE);
+#endif
 	return xemusnap_write_sub_block(buffer, sizeof buffer);
 }
 

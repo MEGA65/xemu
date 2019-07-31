@@ -13,7 +13,7 @@
    ie GTK, so a dozens years old (unmodified) GEOS app would be able to run on a PC
    with modern look and feel, ie anti-aliased fonts, whatever ...
    ---------------------------------------------------------------------------------
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
    ---------------------------------------------------------------------------------
 
 This program is free software; you can redistribute it and/or modify
@@ -31,10 +31,12 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 #include "xemu/emutools.h"
+#include "xemu/emutools_files.h"
 #include "commodore_geos.h"
-#include "xemu/cpu65c02.h"
+#include "xemu/cpu65.h"
 #include "xemu/cia6526.h"
 #include "xemu/emutools_hid.h"
+#include "xemu/emutools_config.h"
 #include "xemu/c64_kbd_mapping.h"
 #include "geos.h"
 
@@ -80,7 +82,7 @@ Uint8 memory[IO_OFFSET + 1];
 #define KERNAL_PATCH_ADDR	0xE388
 #define PATCH_P			memory[KERNAL_PATCH_ADDR - 0xE000 + KERNAL_ROM_OFFSET]
 #define PATCH_OLD_BYTE		0x6C
-#define PATCH_NEW_BYTE		CPU_TRAP
+#define PATCH_NEW_BYTE		CPU65_TRAP_OPCODE
 
 
 static Uint8 *memcfgs[8][2][16] = {
@@ -100,6 +102,8 @@ static Uint8 *memcfgs[8][2][16] = {
 #define GET_READ_P(a)	(memcfgs[cpu_port_memconfig][0][(a)>>12] + (a))
 #define GET_WRITE_P(a)	(memcfgs[cpu_port_memconfig][1][(a)>>12] + (a))
 #define IS_P_IO(p)	((p) >= IO_VIRT_ADDR)
+
+static const char *rom_fatal_msg = "This is one of the selected ROMs. Without it, Xemu won't work.\nInstall it, or use -romXXX CLI switches to specify another path, see the -h output for help.";
 
 static const char *memconfig_descriptions[8] = {
 		"ALL RAM [v1]", "CHAR+RAM", "CHAR+KERNAL", "ALL *ROM*",
@@ -177,7 +181,7 @@ static inline void PIXEL_POINTER_FINAL_ASSERT ( Uint32 *p )
 
 static void vic2_interrupt_checker ( void )
 {
-	int vic_irq_old = cpu_irqLevel & 2;
+	int vic_irq_old = cpu65.irqLevel & 2;
 	int vic_irq_new;
 	if (vic2_interrupt_status & vic2_registers[0x1A]) {
 		vic2_interrupt_status |= 128;
@@ -189,9 +193,9 @@ static void vic2_interrupt_checker ( void )
 	if (vic_irq_old != vic_irq_new) {
 		DEBUG("VIC2: interrupt change %s -> %s" NL, vic_irq_old ? "active" : "inactive", vic_irq_new ? "active" : "inactive");
 		if (vic_irq_new)
-			cpu_irqLevel |= 2;
+			cpu65.irqLevel |= 2;
 		else
-			cpu_irqLevel &= ~2;
+			cpu65.irqLevel &= ~2;
 	}
 }
 
@@ -443,7 +447,7 @@ static void vic2_render_sprite ( int sprite_no, int sprite_mask, Uint8 *data, Ui
 void vic2_render_screen ( void )
 {
 	int tail_sdl;
-	Uint32 *p_sdl = emu_start_pixel_buffer_access(&tail_sdl);
+	Uint32 *p_sdl = xemu_start_pixel_buffer_access(&tail_sdl);
 	int sprites = vic2_registers[0x15];
 	if (vic2_registers[0x11] & 32)
 		vic2_render_screen_bmm(p_sdl, tail_sdl);
@@ -457,7 +461,7 @@ void vic2_render_screen ( void )
 				vic2_render_sprite(a, mask, memory + vic2_16k_bank + (vic2_sprite_pointers[a] << 6), p_sdl, tail_sdl);	// sprite_pointers are set by the renderer functions above!
 		}
 	}
-	emu_update_screen();
+	xemu_update_screen();
 }
 
 
@@ -466,9 +470,9 @@ static void cia1_setint_cb ( int level )
 {
 	DEBUG("%s: IRQ level changed to %d" NL, cia1.name, level);
 	if (level)
-		cpu_irqLevel |= 1;
+		cpu65.irqLevel |= 1;
 	else
-		cpu_irqLevel &= ~1;
+		cpu65.irqLevel &= ~1;
 }
 
 
@@ -489,7 +493,7 @@ static inline void nmi_set ( int level, int mask )
 		nmi_new_level = nmi_level & (~mask);
 	if ((!nmi_level) && nmi_new_level) {
 		DEBUG("NMI edge is emulated towards the CPU (%d->%d)" NL, nmi_level, nmi_new_level);
-		cpu_nmiEdge = 1;	// the "NMI edge" trigger is deleted by the CPU emulator itself (it's not a level trigger)
+		cpu65.nmiEdge = 1;	// the "NMI edge" trigger is deleted by the CPU emulator itself (it's not a level trigger)
 	}
 	nmi_level = nmi_new_level;
 }
@@ -507,31 +511,24 @@ void clear_emu_events ( void )
 }
 
 
-#define KBSEL cia1.PRA
-
-
 static Uint8 cia1_in_b ( void )
 {
-	return
-		((KBSEL &   1) ? 0xFF : kbd_matrix[0]) &
-		((KBSEL &   2) ? 0xFF : kbd_matrix[1]) &
-		((KBSEL &   4) ? 0xFF : kbd_matrix[2]) &
-		((KBSEL &   8) ? 0xFF : kbd_matrix[3]) &
-		((KBSEL &  16) ? 0xFF : kbd_matrix[4]) &
-		((KBSEL &  32) ? 0xFF : kbd_matrix[5]) &
-		((KBSEL &  64) ? 0xFF : kbd_matrix[6]) &
-		((KBSEL & 128) ? 0xFF : kbd_matrix[7]) &
-		(joystick_emu == 1 ? c64_get_joy_state() : 0xFF)
-	;
+	return c64_keyboard_read_on_CIA1_B(
+		cia1.PRA | (~cia1.DDRA),
+		cia1.PRB | (~cia1.DDRB),
+		joystick_emu == 1 ? c64_get_joy_state() : 0xFF
+	);
 }
-
 
 
 static Uint8 cia1_in_a ( void )
 {
-	return joystick_emu == 2 ? c64_get_joy_state() : 0xFF;
+	return c64_keyboard_read_on_CIA1_A(
+		cia1.PRB | (~cia1.DDRB),
+		cia1.PRA | (~cia1.DDRA),
+		joystick_emu == 2 ? c64_get_joy_state() : 0xFF
+	);
 }
-
 
 
 static void cia2_out_a ( Uint8 data )
@@ -555,12 +552,12 @@ static void cpu_port_write ( int addr, Uint8 data )
 	memory[addr] = data;
 	if (addr) {
 		if (cpu_port_memconfig == (data & 7))
-			DEBUG("MEM: memory configuration is the SAME: %d %s @ PC = $%04X" NL, cpu_port_memconfig, memconfig_descriptions[cpu_port_memconfig], cpu_pc);
+			DEBUG("MEM: memory configuration is the SAME: %d %s @ PC = $%04X" NL, cpu_port_memconfig, memconfig_descriptions[cpu_port_memconfig], cpu65.pc);
 		else {
 			DEBUG("MEM: memory configuration is CHANGED : %d %s (from %d %s) @ PC = $%02X" NL,
 				data & 7,           memconfig_descriptions[data & 7],
 				cpu_port_memconfig, memconfig_descriptions[cpu_port_memconfig],
-				cpu_pc
+				cpu65.pc
 			);
 			cpu_port_memconfig = data & 7;
 		}
@@ -568,7 +565,7 @@ static void cpu_port_write ( int addr, Uint8 data )
 }
 
 
-static void geosemu_init ( const char *disk_image_name )
+static void geosemu_init ( void )
 {
 	hid_init(
 		c64_key_map,
@@ -583,11 +580,11 @@ static void geosemu_init ( const char *disk_image_name )
 	cpu_port_write(1, CPU_PORT_DEFAULT_VALUE1);
 	// *** Load ROM image
 	if (
-		emu_load_file("c64-basic.rom",   memory + BASIC_ROM_OFFSET,  8193) != 8192 ||
-		emu_load_file("c64-kernal.rom",  memory + KERNAL_ROM_OFFSET, 8193) != 8192 ||
-		emu_load_file("c64-chargen.rom", memory + CHAR_ROM_OFFSET,   4097) != 4096
+		xemu_load_file(xemucfg_get_str("rombasic"),  memory + BASIC_ROM_OFFSET,  8192, 8192, rom_fatal_msg) < 0 ||
+		xemu_load_file(xemucfg_get_str("romkernal"), memory + KERNAL_ROM_OFFSET, 8192, 8192, rom_fatal_msg) < 0 ||
+		xemu_load_file(xemucfg_get_str("romchar"),   memory + CHAR_ROM_OFFSET,   4096, 4096, rom_fatal_msg) < 0
 	)
-		FATAL("Cannot load (one of the) system ROMs!");
+		XEMUEXIT(1);
 	// *** Patching ROM for custom GEOS loader
 	if (PATCH_P != PATCH_OLD_BYTE)
 		FATAL("FATAL: ROM problem, patching point does not contain the expected value!");
@@ -621,7 +618,7 @@ static void geosemu_init ( const char *disk_image_name )
 	// Initialize Disk Image
 	// TODO
 	// *** RESET CPU, also fetches the RESET vector into PC
-	cpu_reset();
+	cpu65_reset();
 	DEBUG("INIT: end of initialization!" NL);
 }
 
@@ -629,7 +626,7 @@ static void geosemu_init ( const char *disk_image_name )
 
 static Uint8 io_read ( int addr )
 {
-	DEBUG("IO: reading $%04X @ PC=$%04X" NL, addr, cpu_pc);
+	DEBUG("IO: reading $%04X @ PC=$%04X" NL, addr, cpu65.pc);
 	if (addr < 0xD400)		// D000-D3FF  VIC-II
 		return vic2_read_reg(addr);
 	if (addr < 0xD800)		// D400-D7FF  SID   (not emulated here)
@@ -647,7 +644,7 @@ static Uint8 io_read ( int addr )
 
 static void io_write ( int addr, Uint8 data )
 {
-	DEBUG("IO: writing $%04X with $%02X @ PC=$%04X" NL, addr, data, cpu_pc);
+	DEBUG("IO: writing $%04X with $%02X @ PC=$%04X" NL, addr, data, cpu65.pc);
 	if (addr < 0xD400) {		// D000-D3FF  VIC-II
 		vic2_write_reg(addr, data);
 		return;
@@ -671,26 +668,26 @@ static void io_write ( int addr, Uint8 data )
 
 
 
-int cpu_trap ( Uint8 opcode )
+int cpu65_trap_callback ( Uint8 opcode )
 {
-	Uint8 *pc_p = GET_READ_P(cpu_pc);
+	Uint8 *pc_p = GET_READ_P(cpu65.pc);
 	if (pc_p != 1 + &PATCH_P) {
 		if (warp)
-			FATAL("FATAL: CPU trap at unknown address in warp mode (pre-GEOS loading) PC=$%04X OP=$%02X" NL, cpu_pc, opcode);
+			FATAL("FATAL: CPU trap at unknown address in warp mode (pre-GEOS loading) PC=$%04X OP=$%02X" NL, cpu65.pc, opcode);
 		if (pc_p >= memory + 0x10000)
-			FATAL("FATAL: unknown CPU trap not in the RAM PC=$%04X OP=$%02X" NL, cpu_pc, opcode);
+			FATAL("FATAL: unknown CPU trap not in the RAM PC=$%04X OP=$%02X" NL, cpu65.pc, opcode);
 		if (geos_loaded != 2)
-			FATAL("FATAL: unknown CPU without GEOS loaded PC=$%04X OP=$%02X" NL, cpu_pc, opcode);
+			FATAL("FATAL: unknown CPU without GEOS loaded PC=$%04X OP=$%02X" NL, cpu65.pc, opcode);
 		geos_cpu_trap(opcode);
 		return 1;
 	}
 	warp = 0;	// turn warp speed off
 	// Try to load a custom GEOS kernal directly into the RAM
 	if (geos_loaded) {
-		cpu_pc = memory[0x300] | (memory[0x301] << 8);
+		cpu65.pc = memory[0x300] | (memory[0x301] << 8);
 		return 1;
 	}
-	if (!geos_load_kernal()) {
+	if (!geos_load_kernal(xemucfg_get_str("geoskernal"))) {
 		geos_loaded = 2;	// GEOS was OK!!!!
 		return 1;	// if no error, return with '1' (as not zero) to signal CPU emulator that trap should not be executed
 	}
@@ -698,14 +695,21 @@ int cpu_trap ( Uint8 opcode )
 	// In case if we cannot load some GEOS kernal stuff, continue in "C64 mode" ... :-/
 	// Some ugly method to produce custom "startup screen" :)
 	inject_screencoded_message(41, "**** Can't load GEOS, boot as C64 ****");
-	cpu_pc = memory[0x300] | (memory[0x301] << 8);
+	cpu65.pc = memory[0x300] | (memory[0x301] << 8);
 	return 1;	// do NOT execute the trap op
+}
+
+
+void cpu65_illegal_opcode_callback ( void )
+{
+	ERROR_WINDOW("Unemulated NMOS 6502 opcode $%02X at PC=$%04X", cpu65.op, cpu65.pc - 1);
+	cpu65_reset();
 }
 
 
 
 // This function is called by the 65C02 emulator in case of reading a byte (regardless of data or code)
-Uint8 cpu_read ( Uint16 addr )
+Uint8 cpu65_read_callback ( Uint16 addr )
 {
 	Uint8 *p = GET_READ_P(addr);
 	return IS_P_IO(p) ? io_read(addr) : *p;
@@ -714,7 +718,7 @@ Uint8 cpu_read ( Uint16 addr )
 
 
 // This function is called by the 65C02 emulator in case of writing a byte
-void cpu_write ( Uint16 addr, Uint8 data )
+void cpu65_write_callback ( Uint16 addr, Uint8 data )
 {
 	Uint8 *p = GET_WRITE_P(addr);
 	if (IS_P_IO(p))
@@ -730,7 +734,7 @@ void cpu_write ( Uint16 addr, Uint8 data )
 // Called in case of an RMW (read-modify-write) opcode write access.
 // Original NMOS 6502 would write the old_data first, then new_data.
 // It has no inpact in case of normal RAM, but it *does* with an I/O register in some cases!
-void cpu_write_rmw ( Uint16 addr, Uint8 old_data, Uint8 new_data )
+void cpu65_write_rmw_callback ( Uint16 addr, Uint8 old_data, Uint8 new_data )
 {
 	Uint8 *p = GET_WRITE_P(addr);
 	if (IS_P_IO(p)) {
@@ -746,7 +750,7 @@ void cpu_write_rmw ( Uint16 addr, Uint8 old_data, Uint8 new_data )
 
 static void shutdown_callback ( void )
 {
-	DEBUG("SHUTDOWN: @ PC=$%04X" NL, cpu_pc);
+	DEBUG("SHUTDOWN: @ PC=$%04X" NL, cpu65.pc);
 }
 
 
@@ -757,7 +761,7 @@ int emu_callback_key ( int pos, SDL_Scancode key, int pressed, int handled )
 		if (key == SDL_SCANCODE_F10) {
 			cpu_port_write(0, CPU_PORT_DEFAULT_VALUE0);
 			cpu_port_write(1, CPU_PORT_DEFAULT_VALUE1);
-			cpu_reset();
+			cpu65_reset();
 			nmi_level = 0;
 			DEBUG("RESET!" NL);
 		} else if (key == SDL_SCANCODE_KP_ENTER)
@@ -774,10 +778,10 @@ static void update_emulator ( void )
 	// Screen rendering: begin
 	vic2_render_screen();
 	// Screen rendering: end
-	emu_timekeeping_delay(40000);
+	xemu_timekeeping_delay(40000);
 	// Ugly CIA trick to maintain realtime TOD in CIAs :)
 	if (seconds_timer_trigger) {
-		struct tm *t = emu_get_localtime();
+		struct tm *t = xemu_get_localtime();
 		cia_ugly_tod_updater(&cia1, t);
 		cia_ugly_tod_updater(&cia2, t);
 	}
@@ -789,11 +793,19 @@ static void update_emulator ( void )
 int main ( int argc, char **argv )
 {
 	int cycles, frameskip;
-	xemu_dump_version(stdout, "The Unexplained Commodore GEOS emulator from LGB");
+	xemu_pre_init(APP_ORG, TARGET_NAME, "The Unexplained Commodore GEOS emulator from LGB");
+	xemucfg_define_switch_option("fullscreen", "Start in fullscreen mode");
+	xemucfg_define_str_option("geosimg", NULL, "Select GEOS disk image to use (NOT USED YET!)");
+	xemucfg_define_str_option("geoskernal", "#geos-kernal.bin", "Select GEOS KERNAL to use");
+	xemucfg_define_str_option("rombasic", "#c64-basic.rom", "Select BASIC ROM to use");
+	xemucfg_define_str_option("romchar", "#c64-chargen.rom", "Select CHARACTER ROM to use");
+	xemucfg_define_str_option("romkernal", "#c64-kernal.rom", "Select KERNAL ROM to use");
+	xemucfg_define_switch_option("syscon", "Keep system console open (Windows-specific effect only)");
+	if (xemucfg_parse_all(argc, argv))
+		return 1;
 	/* Initiailize SDL - note, it must be before loading ROMs, as it depends on path info from SDL! */
-        if (emu_init_sdl(
+        if (xemu_post_init(
 		TARGET_DESC APP_DESC_APPEND,	// window title
-		APP_ORG, TARGET_NAME,		// app organization and name, used with SDL pref dir formation
 		1,				// resizable window
 		SCREEN_WIDTH, SCREEN_HEIGHT,	// texture sizes
 		SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2,// logical size (used with keeping aspect ratio by the SDL render stuffs)
@@ -807,16 +819,17 @@ int main ( int argc, char **argv )
 		shutdown_callback		// registered shutdown function
 	))
 		return 1;
-	// Initialize C65 ...
-	geosemu_init(
-		argc > 1 ? argv[1] : NULL	// disk image name
-	);
-	// Start!!
+	// Initialize
+	geosemu_init();
 	cycles = 0;
 	frameskip = 0;
-	emu_timekeeping_start();
+	xemu_set_full_screen(xemucfg_get_bool("fullscreen"));
+	if (!xemucfg_get_bool("syscon"))
+		sysconsole_close(NULL);
+	// Start!!
+	xemu_timekeeping_start();
 	for (;;) {
-		int opcyc = cpu_step();
+		int opcyc = cpu65_step();
 		cia_tick(&cia1, opcyc);
 		cia_tick(&cia2, opcyc);
 		cycles += opcyc;

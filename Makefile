@@ -29,16 +29,21 @@ all:
 all-arch:
 	for t in $(TARGETS) ; do for a in $(ARCHS) ; do $(MAKE) -C targets/$$t ARCH=$$a || exit 1 ; done ; done
 
+all-html:
+	for t in $(TARGETS) ; do egrep -q '^#\s*define\s+CONFIG_EMSCRIPTEN_OK\s*$$' targets/$$t/xemu-target.h && make -C targets/$$t ARCH=html ; done
+
 clean:
 	for t in $(TARGETS) ; do $(MAKE) -C targets/$$t clean || exit 1 ; done
 
 all-clean:
 	for t in $(TARGETS) ; do for a in $(ARCHS) ; do $(MAKE) -C targets/$$t ARCH=$$a clean || exit 1 ; done ; done
 	$(MAKE) -C rom clean
+	$(MAKE) -C build/bin clean
 
 distclean:
 	$(MAKE) all-clean
 	$(MAKE) -C rom distclean
+	$(MAKE) -C build/bin/clean
 
 dep:
 	for t in $(TARGETS) ; do $(MAKE) -C targets/$$t dep || exit 1 ; done
@@ -53,4 +58,17 @@ deb:
 	$(MAKE) all
 	build/deb-build-simple
 
-.PHONY: all all-arch clean all-clean roms distclean dep all-dep deb
+nsi:
+	rm -f build/bin/*.[dD][lL][lL] build/bin/*.[eE][xX][eE]
+	for t in $(TARGETS) ; do for a in win32 win64 ; do $(MAKE) -C targets/$$t ARCH=$$a || exit 1 ; done ; done
+	build/nsi-build win32 `build/system-config win32 sdl2 dll`
+	build/nsi-build win64 `build/system-config win64 sdl2 dll`
+
+publish:
+	$(MAKE)
+	$(MAKE) deb
+	$(MAKE) nsi
+	$(MAKE) -C build/bin dist
+	@echo "*** You should not use this target, this is only for distributing binaries on the site of the author!"
+
+.PHONY: all all-arch clean all-clean roms distclean dep all-dep deb nsi publish

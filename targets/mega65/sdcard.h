@@ -1,5 +1,6 @@
-/* Very primitive emulator of Commodore 65 + sub-set (!!) of Mega65 fetures.
-   Copyright (C)2016 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+/* A work-in-progess Mega-65 (Commodore-65 clone origins) emulator
+   Part of the Xemu project, please visit: https://github.com/lgblgblgb/xemu
+   Copyright (C)2016-2018 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -28,11 +29,18 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #define SD_ST_BUSY0	0x01
 
 
-extern int   sdcard_init           ( const char *fn, const char *extd81fn );
+extern int   sdcard_init           ( const char *fn, const char *extd81fn, int sdhc_flag );
 extern void  sdcard_write_register ( int reg, Uint8 data );
 extern Uint8 sdcard_read_register  ( int reg  );
-extern int   sdcard_read_buffer    ( int addr );
-extern int   sdcard_write_buffer   ( int addr,   Uint8 data );
+
+#define SD_BUFFER_POS 0x0E00
+#define FD_BUFFER_POS 0x0C00
+
+#define sd_buffer	(disk_buffers+SD_BUFFER_POS)
+
+// disk buffer for SD (can be mapped to I/O space too), F011, and some "3.5K scratch space"
+extern Uint8 disk_buffers[0x1000];
+extern Uint8 sd_status;
 
 #ifdef XEMU_SNAPSHOT_SUPPORT
 #include "xemu/emutools_snapshot.h"

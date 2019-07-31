@@ -1,7 +1,7 @@
 /* Xemu - Somewhat lame emulation (running on Linux/Unix/Windows/OSX, utilizing
    SDL2) of some 8 bit machines, including the Commodore LCD and Commodore 65
    and some Mega-65 features as well.
-   Copyright (C)2016,2017 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016-2019 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
    The goal of emutools.c is to provide a relative simple solution
    for relative simple emulators using SDL2.
@@ -33,35 +33,63 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 	do { if (1 || sdlflag == SDL_MESSAGEBOX_ERROR) { EM_ASM_INT({ window.alert(Pointer_stringify($0)); }, msg); } } while(0)
 #else
 #define MSG_POPUP_WINDOW(sdlflag, title, msg, win) SDL_ShowSimpleMessageBox(sdlflag, title, msg, win)
+#define INSTALL_DIRECTORY_ENTRY_NAME "default-files"
 #endif
 
 #define APP_ORG "xemu-lgb"
-#define APP_DESC_APPEND " / LGB"
+#ifndef APP_DESC_APPEND
+#define APP_DESC_APPEND " - Xemu"
+#endif
+
+#ifdef __EMSCRIPTEN__
+#define XEMU_MAIN_LOOP(func,p1,p2) emscripten_set_main_loop(func,p1,p2)
+#else
+#define XEMU_MAIN_LOOP(func,p1,p2) for (;;) func()
+#endif
+
+extern void sysconsole_open  ( void );
+extern void sysconsole_close ( const char *waitmsg );
+#ifdef HAVE_XEMU_SOCKET_API
+extern int  xemu_use_sockapi ( void );
+extern void xemu_free_sockapi ( void );
+#endif
 
 // You should define this in your emulator, most probably with resetting the keyboard matrix
 // Purpose: emulator windows my cause the emulator does not get the key event normally, thus some keys "seems to be stucked"
 extern void clear_emu_events ( void );
 
-extern void emu_drop_events ( void );
+extern void xemu_drop_events ( void );
 
-extern void set_mouse_grab ( SDL_bool state );
+extern int  set_mouse_grab ( SDL_bool state );
 extern SDL_bool is_mouse_grab ( void );
 extern void save_mouse_grab ( void );
 extern void restore_mouse_grab ( void );
 
+static XEMU_INLINE int CHECK_SNPRINTF( int ret, int limit )
+{
+	if (ret < 0 || ret >= limit - 1) {
+		fprintf(stderr, "SNPRINTF-ERROR: too long string or other error (ret=%d) ..." NL, ret);
+		return -1;
+	}
+	return 0;
+}
+
 #define _REPORT_WINDOW_(sdlflag, str, ...) do { \
 	char _buf_for_win_msg_[4096]; \
-	snprintf(_buf_for_win_msg_, sizeof _buf_for_win_msg_, __VA_ARGS__); \
+	CHECK_SNPRINTF(snprintf(_buf_for_win_msg_, sizeof _buf_for_win_msg_, __VA_ARGS__), sizeof _buf_for_win_msg_); \
 	fprintf(stderr, str ": %s" NL, _buf_for_win_msg_); \
 	if (debug_fp)	\
 		fprintf(debug_fp, str ": %s" NL, _buf_for_win_msg_);	\
-	save_mouse_grab(); \
-	MSG_POPUP_WINDOW(sdlflag, sdl_window_title, _buf_for_win_msg_, sdl_win); \
-	clear_emu_events(); \
-	emu_drop_events(); \
-	SDL_RaiseWindow(sdl_win); \
-	restore_mouse_grab(); \
-	emu_timekeeping_start(); \
+	if (sdl_win) { \
+		save_mouse_grab(); \
+		MSG_POPUP_WINDOW(sdlflag, sdl_window_title, _buf_for_win_msg_, sdl_win); \
+		clear_emu_events(); \
+		xemu_drop_events(); \
+		SDL_RaiseWindow(sdl_win); \
+		restore_mouse_grab(); \
+		xemu_timekeeping_start(); \
+	} else \
+		MSG_POPUP_WINDOW(sdlflag, sdl_window_title, _buf_for_win_msg_, sdl_win); \
 } while (0)
 
 #define INFO_WINDOW(...)	_REPORT_WINDOW_(SDL_MESSAGEBOX_INFORMATION, "INFO", __VA_ARGS__)
@@ -82,33 +110,34 @@ extern char *window_title_info_addon;
 extern SDL_Window   *sdl_win;
 extern Uint32 sdl_winid;
 extern SDL_PixelFormat *sdl_pix_fmt;
+extern char *xemu_app_org, *xemu_app_name;
 extern int seconds_timer_trigger;
-extern char *sdl_pref_dir, *sdl_base_dir;
+extern char *sdl_pref_dir, *sdl_base_dir, *sdl_inst_dir;
+extern int sysconsole_is_open;
 
-extern int emu_init_debug ( const char *fn );
-extern time_t emu_get_unixtime ( void );
-extern struct tm *emu_get_localtime ( void );
-extern void *emu_malloc ( size_t size );
-extern void *emu_realloc ( void *p, size_t size );
+extern int xemu_init_debug ( const char *fn );
+extern time_t xemu_get_unixtime ( void );
+extern struct tm *xemu_get_localtime ( void );
+extern void *xemu_malloc ( size_t size );
+extern void *xemu_realloc ( void *p, size_t size );
 
 #if !defined(__EMSCRIPTEN__) && !defined(__arm__)
 #define HAVE_MM_MALLOC
 #endif
 
 #ifdef HAVE_MM_MALLOC
-extern void *emu_malloc_ALIGNED ( size_t size );
+extern void *xemu_malloc_ALIGNED ( size_t size );
 #else
-#define emu_malloc_ALIGNED emu_malloc
+#define xemu_malloc_ALIGNED xemu_malloc
 #endif
 
-extern char *emu_strdup ( const char *s );
-extern int emu_load_file ( const char *fn, void *buffer, int maxsize );
-extern void emu_set_full_screen ( int setting );
-extern void emu_timekeeping_delay ( int td_em );
-extern int emu_init_sdl (
+extern char *xemu_strdup ( const char *s );
+extern void xemu_set_full_screen ( int setting );
+extern void xemu_timekeeping_delay ( int td_em );
+extern void xemu_pre_init ( const char *app_organization, const char *app_name, const char *slogan );
+extern int xemu_init_sdl ( void );
+extern int xemu_post_init (
         const char *window_title,               // title of our window
-        const char *app_organization,           // organization produced the application, used with SDL_GetPrefPath()
-        const char *app_name,                   // name of the application, used with SDL_GetPrefPath()
         int is_resizable,                       // allow window resize? [0 = no]
         int texture_x_size, int texture_y_size, // raw size of texture (in pixels)
         int logical_x_size, int logical_y_size, // "logical" size in pixels, ie to correct aspect ratio, etc, can be the as texture of course, if it's OK ...
@@ -121,10 +150,10 @@ extern int emu_init_sdl (
         int locked_texture_update,              // use locked texture method [non zero], or malloc'ed stuff [zero]. NOTE: locked access doesn't allow to _READ_ pixels and you must fill ALL pixels!
         void (*shutdown_callback)(void)         // callback function called on exit (can be nULL to not have any emulator specific stuff)
 );
-extern void emu_timekeeping_start ( void );
-extern void emu_render_dummy_frame ( Uint32 colour, int texture_x_size, int texture_y_size );
-extern Uint32 *emu_start_pixel_buffer_access ( int *texture_tail );
-extern void emu_update_screen ( void );
+extern void xemu_timekeeping_start ( void );
+extern void xemu_render_dummy_frame ( Uint32 colour, int texture_x_size, int texture_y_size );
+extern Uint32 *xemu_start_pixel_buffer_access ( int *texture_tail );
+extern void xemu_update_screen ( void );
 
 extern int  osd_init ( int xsize, int ysize, const Uint8 *palette, int palette_entries, int fade_dec, int fade_end );
 extern int  osd_init_with_defaults ( void );
@@ -147,8 +176,11 @@ extern void osd_write_string ( int x, int y, const char *s );
 
 
 #define OSD(x, y, ...) do { \
+	char _buf_for_msg_[4096]; \
+	CHECK_SNPRINTF(snprintf(_buf_for_msg_, sizeof _buf_for_msg_, __VA_ARGS__), sizeof _buf_for_msg_); \
+	fprintf(stderr, "OSD: %s" NL, _buf_for_msg_); \
 	osd_clear(); \
-	osd_write_string(x, y, __VA_ARGS__); \
+	osd_write_string(x, y, _buf_for_msg_); \
 	osd_update(); \
 	osd_on(OSD_FADE_START); \
 } while(0)
