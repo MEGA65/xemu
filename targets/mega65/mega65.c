@@ -1,4 +1,4 @@
-/* A work-in-progess Mega-65 (Commodore-65 clone origins) emulator
+/* A work-in-progess MEGA65 (Commodore 65 clone origins) emulator
    Part of the Xemu project, please visit: https://github.com/lgblgblgb/xemu
    Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
@@ -38,9 +38,9 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #include "input_devices.h"
 #include "memcontent.h"
 #include "xemu/emutools_gui.h"
+#include "audio65.h"
+#include "inject.h"
 
-
-static SDL_AudioDeviceID audio = 0;
 
 static int nmi_level;			// please read the comment at nmi_set() below
 
@@ -53,12 +53,15 @@ static int frame_counter;
 static int   paused = 0, paused_old = 0;
 static int   breakpoint_pc = -1;
 static int   trace_step_trigger = 0;
+#ifdef HAS_UARTMON_SUPPORT
 static void (*m65mon_callback)(void) = NULL;
+#endif
 static const char emulator_paused_title[] = "TRACE/PAUSE";
 static char emulator_speed_title[] = "????MHz";
 static int cpu_cycles_per_step = 100; 	// some init value, will be overriden, but it must be greater initially than "only a few" anyway
 
 static int force_external_rom = 0;
+static int force_upload_fonts = 0;
 
 
 void cpu65_illegal_opcode_callback ( void )
@@ -72,7 +75,7 @@ void cpu65_illegal_opcode_callback ( void )
 void machine_set_speed ( int verbose )
 {
 	int speed_wanted;
-	// TODO: Mega65 speed is not handled yet. Reasons: too slow emulation for average PC, and the complete control of speed, ie lack of C128-fast (2MHz mode,
+	// TODO: MEGA65 speed is not handled yet. Reasons: too slow emulation for average PC, and the complete control of speed, ie lack of C128-fast (2MHz mode,
 	// because of incomplete VIC register I/O handling).
 	// Actually the rule would be something like that (this comment is here by intent, for later implementation FIXME TODO), some VHDL draft only:
 	// cpu_speed := vicii_2mhz&viciii_fast&viciv_fast
@@ -87,9 +90,10 @@ void machine_set_speed ( int verbose )
 	//	return;
 	if (verbose)
 		DEBUGPRINT("SPEED: in_hypervisor=%d force_fast=%d c128_fast=%d, c65_fast=%d m65_fast=%d" NL,
-			in_hypervisor, force_fast, (c128_d030_reg & 1) ^ 1, vic_registers[0x31] & 64, vic_registers[0x54] & 64
+			in_hypervisor, force_fast, (c128_d030_reg & 1), vic_registers[0x31] & 64, vic_registers[0x54] & 64
 	);
-	speed_wanted = (in_hypervisor || force_fast) ? 7 : (((c128_d030_reg & 1) << 2) | ((vic_registers[0x31] & 64) >> 5) | ((vic_registers[0x54] & 64) >> 6));
+	// ^1 at c128... because it was inverted :-O --> FIXME: this is ugly workaround, the switch statement should be re-organized
+	speed_wanted = (in_hypervisor || force_fast) ? 7 : ((((c128_d030_reg & 1) ^ 1) << 2) | ((vic_registers[0x31] & 64) >> 5) | ((vic_registers[0x54] & 64) >> 6));
 	if (speed_wanted != speed_current) {
 		speed_current = speed_wanted;
 		switch (speed_wanted) {
@@ -97,21 +101,25 @@ void machine_set_speed ( int verbose )
 			case 5:	// 101 - 1MHz
 				cpu_cycles_per_scanline = CPU_C64_CYCLES_PER_SCANLINE;
 				strcpy(emulator_speed_title, "1MHz");
+				cpu65_set_ce_timing(0);
 				break;
 			case 0:	// 000 - 2MHz
 				cpu_cycles_per_scanline = CPU_C128_CYCLES_PER_SCANLINE;
 				strcpy(emulator_speed_title, "2MHz");
+				cpu65_set_ce_timing(0);
 				break;
 			case 2:	// 010 - 3.5MHz
 			case 6:	// 110 - 3.5MHz
 				cpu_cycles_per_scanline = CPU_C65_CYCLES_PER_SCANLINE;
 				strcpy(emulator_speed_title, "3.5MHz");
+				cpu65_set_ce_timing(1);
 				break;
-			case 1:	// 001 - 50MHz (or Xemu specified custom speed)
+			case 1:	// 001 - 40MHz (or Xemu specified custom speed)
 			case 3:	// 011 -		-- "" --
 			case 7:	// 111 -		-- "" --
 				cpu_cycles_per_scanline = cpu_cycles_per_scanline_for_fast_mode;
 				strcpy(emulator_speed_title, fast_mhz_in_string);
+				cpu65_set_ce_timing(1);
 				break;
 		}
 		DEBUG("SPEED: CPU speed is set to %s" NL, emulator_speed_title);
@@ -182,17 +190,6 @@ static Uint8 cia_port_in_dummy ( void )
 
 
 
-static void audio_callback(void *userdata, Uint8 *stream, int len)
-{
-	// DEBUG("AUDIO: audio callback, wants %d samples" NL, len);
-	// We use the trick, to render boths SIDs with step of 2, with a byte offset
-	// to get a stereo stream, wanted by SDL.
-	sid_render(&sid2, ((short *)(stream)) + 0, len >> 1, 2);	// SID @ left
-	sid_render(&sid1, ((short *)(stream)) + 1, len >> 1, 2);	// SID @ right
-}
-
-
-
 #ifdef XEMU_SNAPSHOT_SUPPORT
 static const char *m65_snapshot_saver_filename = NULL;
 static void m65_snapshot_saver_on_exit_callback ( void )
@@ -252,22 +249,28 @@ static void refill_memory_from_preinit_cache ( void )
 
 int refill_c65_rom_from_preinit_cache ( void )
 {
+	int ret;
 	if (force_external_rom) {
+		DEBUGPRINT("ROM: forcing re-apply of ROM image" NL);
 		memcpy(main_ram + 0x20000, rom_init_image, sizeof rom_init_image);
 		// memcpy(char_wom, rom_init_image + 0xD000, sizeof char_wom);	// also fill char-WOM [FIXME: do we really want this?!]
 		// The 128K ROM image is actually holds the reset bector at the lower 64K, ie C65 would start in "C64 mode" for real, just it switches into C65 mode then ...
-		return rom_init_image[0xFFFC] | (rom_init_image[0xFFFD] << 8);	// pass back new reset vector
-	} else
-		return -1; // no refill force external rom policy ...
+		ret = rom_init_image[0xFFFC] | (rom_init_image[0xFFFD] << 8);	// pass back new reset vector
+	} else {
+		ret = -1; // no refill force external rom policy ...
+	}
+	if (force_upload_fonts) {
+		DEBUGPRINT("ROM: forcing upload font definitions from ROM area to WOM" NL);
+		memcpy(char_wom + 0x0000, main_ram + 0x2D000, 0x1000);
+		memcpy(char_wom + 0x1000, main_ram + 0x29000, 0x1000);
+	}
+	return ret;
 }
 
 
-static void mega65_init ( int sid_cycles_per_sec, int sound_mix_freq )
+static void mega65_init ( void )
 {
 	const char *p;
-#ifdef AUDIO_EMULATION
-	SDL_AudioSpec audio_want, audio_got;
-#endif
 	hypervisor_debug_init(xemucfg_get_str("kickuplist"), xemucfg_get_bool("hyperdebug"), xemucfg_get_bool("hyperserialascii"));
 	hid_init(
 		c64_key_map,
@@ -305,12 +308,13 @@ static void mega65_init ( int sid_cycles_per_sec, int sound_mix_freq )
 		DEBUGPRINT("MEM: forcing external ROM usage (hypervisor leave memory re-fill policy)" NL);
 	else if (xemucfg_get_bool("forcerom"))
 		ERROR_WINDOW("-forcerom is ignored, because no -loadrom <filename> option was used, or it was not a succesfull load operation at least");
+	force_upload_fonts = xemucfg_get_bool("fontrefresh");
 	load_memory_preinit_cache(0, "loadcram", "CRAM utilities", meminitdata_cramutils, MEMINITDATA_CRAMUTILS_SIZE);
 	load_memory_preinit_cache(0, "loadbanner", "M65 logo", meminitdata_banner, MEMINITDATA_BANNER_SIZE);
 	load_memory_preinit_cache(1, "loadc000", "C000 utilities", c000_init_image, sizeof c000_init_image);
 	if (load_memory_preinit_cache(0, "kickup", "M65 kickstart", meminitdata_kickstart, MEMINITDATA_KICKSTART_SIZE)  != MEMINITDATA_KICKSTART_SIZE)
 		hypervisor_debug_invalidate("no kickup is loaded, built-in one does not have debug info");
-	// *** Initializes memory subsystem of Mega65 emulation itself
+	// *** Initializes memory subsystem of MEGA65 emulation itself
 	memory_init();
 	// fill the actual M65 memory areas with values managed by load_memory_preinit_cache() calls
 	// This is a separated step, to be able to call refill_memory_from_preinit_cache() later as well, in case of a "deep reset" functionality is needed for Xemu (not just CPU/hw reset),
@@ -318,7 +322,7 @@ static void mega65_init ( int sid_cycles_per_sec, int sound_mix_freq )
 	refill_memory_from_preinit_cache();
 	// *** Image file for SDCARD support
 	if (sdcard_init(xemucfg_get_str("sdimg"), xemucfg_get_str("8"), xemucfg_get_bool("virtsd")) < 0)
-		FATAL("Cannot find SD-card image (which is a must for Mega65 emulation): %s", xemucfg_get_str("sdimg"));
+		FATAL("Cannot find SD-card image (which is a must for MEGA65 emulation): %s", xemucfg_get_str("sdimg"));
 	// *** Initialize VIC4
 	vic_init();
 	// *** CIAs
@@ -345,35 +349,9 @@ static void mega65_init ( int sid_cycles_per_sec, int sound_mix_freq )
 	dma_init(newhack ? DMA_FEATURE_HACK | DMA_FEATURE_DYNMODESET : xemucfg_get_num("dmarev"));
 	// Initialize FDC
 	fdc_init(disk_buffers + FD_BUFFER_POS);
-	// SIDs, plus SDL audio
-	sid_init(&sid1, sid_cycles_per_sec, sound_mix_freq);
-	sid_init(&sid2, sid_cycles_per_sec, sound_mix_freq);
-#ifdef AUDIO_EMULATION
-	SDL_memset(&audio_want, 0, sizeof(audio_want));
-	audio_want.freq = sound_mix_freq;
-	audio_want.format = AUDIO_S16SYS;	// used format by SID emulation (ie: signed short)
-	audio_want.channels = 2;		// that is: stereo, for the two SIDs
-	audio_want.samples = 1024;		// Sample size suggested (?) for the callback to render once
-	audio_want.callback = audio_callback;	// Audio render callback function, called periodically by SDL on demand
-	audio_want.userdata = NULL;		// Not used, "userdata" parameter passed to the callback by SDL
-	audio = SDL_OpenAudioDevice(NULL, 0, &audio_want, &audio_got, 0);
-	if (audio) {
-		int i;
-		for (i = 0; i < SDL_GetNumAudioDevices(0); i++)
-			DEBUG("AUDIO: audio device is #%d: %s" NL, i, SDL_GetAudioDeviceName(i, 0));
-		// Sanity check that we really got the same audio specification we wanted
-		if (audio_want.freq != audio_got.freq || audio_want.format != audio_got.format || audio_want.channels != audio_got.channels) {
-			SDL_CloseAudioDevice(audio);	// forget audio, if it's not our expected format :(
-			audio = 0;
-			ERROR_WINDOW("Audio parameter mismatches.");
-		}
-		DEBUGPRINT("AUDIO: initialized (#%d), %d Hz, %d channels, %d buffer sample size." NL, audio, audio_got.freq, audio_got.channels, audio_got.samples);
-	} else
-		ERROR_WINDOW("Cannot open audio device!");
-#endif
 	//
-#ifdef UARTMON_SOCKET
-	uartmon_init(UARTMON_SOCKET);
+#ifdef HAS_UARTMON_SUPPORT
+	uartmon_init(xemucfg_get_str("uartmon"));
 #endif
 	fast_mhz = xemucfg_get_num("fastclock");
 	if (fast_mhz < 3 || fast_mhz > 200) {
@@ -426,7 +404,7 @@ static void shutdown_callback ( void )
 		DEBUGPRINT("Memory state is dumped into %s" DIRSEP_STR "%s" NL, getcwd(NULL, PATH_MAX), MEMDUMP_FILE);
 	}
 #endif
-#ifdef UARTMON_SOCKET
+#ifdef HAS_UARTMON_SUPPORT
 	uartmon_close();
 #endif
 	DEBUG("Execution has been stopped at PC=$%04X" NL, cpu65.pc);
@@ -451,9 +429,15 @@ void reset_mega65 ( void )
 	nmi_level = 0;
 	D6XX_registers[0x7E] = xemucfg_get_num("kicked");
 	hypervisor_start_machine();
-	DEBUG("RESET!" NL);
+	DEBUGPRINT("SYSTEM RESET." NL);
 }
 
+
+void reset_mega65_asked ( void )
+{
+	if (ARE_YOU_SURE("Are you sure to HARD RESET your emulated machine?", i_am_sure_override | ARE_YOU_SURE_DEFAULT_YES))
+		reset_mega65();
+}
 
 static void update_emulator ( void )
 {
@@ -463,7 +447,7 @@ static void update_emulator ( void )
 	// this part is used to trigger 'RESTORE trap' with long press on RESTORE.
 	// see input_devices.c for more information
 	kbd_trigger_restore_trap();
-#ifdef UARTMON_SOCKET
+#ifdef HAS_UARTMON_SUPPORT
 	uartmon_update();
 #endif
 	// Screen rendering: begin
@@ -471,15 +455,16 @@ static void update_emulator ( void )
 	// Screen rendering: end
 	xemu_timekeeping_delay(40000);
 	// Ugly CIA trick to maintain realtime TOD in CIAs :)
-	if (seconds_timer_trigger) {
-		struct tm *t = xemu_get_localtime();
-		cia_ugly_tod_updater(&cia1, t);
-		cia_ugly_tod_updater(&cia2, t);
-	}
+//	if (seconds_timer_trigger) {
+	const struct tm *t = xemu_get_localtime();
+	const Uint8 sec10ths = xemu_get_microseconds() / 100000;
+	cia_ugly_tod_updater(&cia1, t, sec10ths);
+	cia_ugly_tod_updater(&cia2, t, sec10ths);
+//	}
 }
 
 
-
+#ifdef HAS_UARTMON_SUPPORT
 void m65mon_show_regs ( void )
 {
 	Uint8 pf = cpu65_get_pf();
@@ -562,6 +547,7 @@ void m65mon_breakpoint ( int brk )
 	else
 		cpu_cycles_per_step = 0;
 }
+#endif
 
 static int cycles, frameskip;
 
@@ -571,11 +557,13 @@ static void emulation_loop ( void )
 		while (XEMU_UNLIKELY(paused)) {	// paused special mode, ie tracing support, or something ...
 			if (XEMU_UNLIKELY(dma_status))
 				break;		// if DMA is pending, do not allow monitor/etc features
+#ifdef HAS_UARTMON_SUPPORT
 			if (m65mon_callback) {	// delayed uart monitor command should be finished ...
 				m65mon_callback();
 				m65mon_callback = NULL;
 				uartmon_finish_command();
 			}
+#endif
 			// we still need to feed our emulator with update events ... It also slows this pause-busy-loop down to every full frames (~25Hz)
 			// note, that it messes timing up a bit here, as there is update_emulator() calls later in the "normal" code as well
 			// this can be a bug, but real-time emulation is not so much an issue if you eg doing trace of your code ...
@@ -623,6 +611,8 @@ static void emulation_loop ( void )
 			cia_tick(&cia1, 64);
 			cia_tick(&cia2, 64);
 			if (scanline == 312) {
+				if (XEMU_UNLIKELY(inject_ready_check_status))
+					inject_ready_check_do();
 				//DEBUG("VIC3: new frame!" NL);
 				frameskip = !frameskip;
 				scanline = 0;
@@ -649,7 +639,7 @@ static void emulation_loop ( void )
 
 int main ( int argc, char **argv )
 {
-	xemu_pre_init(APP_ORG, TARGET_NAME, "The Incomplete Mega-65 emulator from LGB");
+	xemu_pre_init(APP_ORG, TARGET_NAME, "The Incomplete MEGA65 emulator from LGB");
 	xemucfg_define_str_option("8", NULL, "Path of EXTERNAL D81 disk image (not on/the SD-image)");
 	xemucfg_define_num_option("dmarev", 0x100, "DMA revision (0/1=F018A/B +256=autochange, +512=modulo, you always wants +256!)");
 	xemucfg_define_num_option("fastclock", MEGA65_DEFAULT_FAST_CLOCK, "Clock of M65 fast mode (in MHz)");
@@ -664,7 +654,10 @@ int main ( int argc, char **argv )
 	xemucfg_define_str_option("loadc000", NULL, "Load initial memory content at $C000 (usually disk mounter)");
 	xemucfg_define_str_option("loadcram", NULL, "Load initial content (32K) into the colour RAM");
 	xemucfg_define_str_option("loadrom", NULL, "Preload C65 ROM image (you may need the -forcerom option to prevent KickStart to re-load from SD)");
+	xemucfg_define_str_option("prg", NULL, "Load a PRG file directly into the memory (/w C64/65 auto-detection on load address)");
+	xemucfg_define_num_option("prgmode", 0, "Override auto-detect option for -prg (64 or 65 for C64/C65 modes, 0 = default, auto detect)");
 	xemucfg_define_switch_option("forcerom", "Re-fill 'ROM' from external source on start-up, requires option -loadrom <filename>");
+	xemucfg_define_switch_option("fontrefresh", "Upload character ROM from the loaded ROM image");
 	xemucfg_define_str_option("sdimg", SDCARD_NAME, "Override path of SD-image to be used (also see the -virtsd option!)");
 #ifdef VIRTUAL_DISK_IMAGE_SUPPORT
 	xemucfg_define_switch_option("virtsd", "Interpret -sdimg option as a DIRECTORY to be fed onto the FAT32FS and use virtual-in-memory disk storage.");
@@ -683,6 +676,9 @@ int main ( int argc, char **argv )
 #ifdef HAVE_XEMU_UMON
 	xemucfg_define_num_option("umon", 0, "TCP-based dual mode (http / text) monitor port number [NOT YET WORKING]");
 #endif
+#ifdef HAS_UARTMON_SUPPORT
+	xemucfg_define_str_option("uartmon", NULL, "Sets the name for named unix-domain socket for uartmon, otherwise disabled");
+#endif
 #ifdef HAVE_XEMU_INSTALLER
 	xemucfg_define_str_option("installer", NULL, "Sets a download-specification descriptor file for auto-downloading data files");
 #endif
@@ -693,8 +689,10 @@ int main ( int argc, char **argv )
 #ifdef HID_KBD_MAP_CFG_SUPPORT
 	xemucfg_define_str_option("keymap", KEYMAP_USER_FILENAME, "Set keymap configuration file to be used");
 #endif
+	xemucfg_define_switch_option("besure", "Skip asking \"are you sure?\" on RESET or EXIT");
 	if (xemucfg_parse_all(argc, argv))
 		return 1;
+	i_am_sure_override = xemucfg_get_bool("besure");
 #ifdef HAVE_XEMU_INSTALLER
 	xemu_set_installer(xemucfg_get_str("installer"));
 #endif
@@ -720,8 +718,9 @@ int main ( int argc, char **argv )
 		return 1;
 	osd_init_with_defaults();
 	xemugui_init(xemucfg_get_str("gui"));
-	// Initialize Mega65
-	mega65_init(
+	// Initialize MEGA65
+	mega65_init();
+	audio65_init(
 		SID_CYCLES_PER_SEC,		// SID cycles per sec
 		AUDIO_SAMPLE_FREQ		// sound mix freq
 	);
@@ -749,6 +748,8 @@ int main ( int argc, char **argv )
 			ERROR_WINDOW("UMON: Invalid TCP port: %d", port);
 	}
 #endif
+	if (xemucfg_get_str("prg"))
+		inject_register_prg(xemucfg_get_str("prg"), xemucfg_get_num("prgmode"));
 #ifdef FAKE_TYPING_SUPPORT
 	if (xemucfg_get_bool("go64")) {
 		if (xemucfg_get_bool("autoload"))

@@ -1,5 +1,5 @@
 /* Part of the Xemu project, please visit: https://github.com/lgblgblgb/xemu
-   Copyright (C)2016-2019 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #include "xemu/emutools_gui.h"
 #include "xemu/emutools_files.h"
 #include "xemu/d81access.h"
+#include "xemu/emutools_hid.h"
 #include "commodore_65.h"
 
 
@@ -94,22 +95,31 @@ static void ui_native_os_file_browser ( void )
 #endif
 
 
+static void osd_key_debugger ( void )
+{
+	hid_show_osd_keys = !hid_show_osd_keys;
+	OSD(-1, -1, "OSD key debugger turned %s", hid_show_osd_keys ? "ON" : "OFF");
+}
+
+
 static const struct menu_st menu_display[] = {
-	{ "Fullscreen",    XEMUGUI_MENUID_CALLABLE, xemugui_cb_windowsize, (void*)0 },
-	{ "Window - 100%", XEMUGUI_MENUID_CALLABLE, xemugui_cb_windowsize, (void*)1 },
-	{ "Window - 200%", XEMUGUI_MENUID_CALLABLE, xemugui_cb_windowsize, (void*)2 },
+	{ "Fullscreen",    	XEMUGUI_MENUID_CALLABLE, xemugui_cb_windowsize, (void*)0 },
+	{ "Window - 100%", 	XEMUGUI_MENUID_CALLABLE, xemugui_cb_windowsize, (void*)1 },
+	{ "Window - 200%", 	XEMUGUI_MENUID_CALLABLE, xemugui_cb_windowsize, (void*)2 },
+	{ "OSD key debugger",	XEMUGUI_MENUID_CALLABLE, xemugui_cb_call_user_data, osd_key_debugger },
 	{ NULL }
 };
 
 
 static const struct menu_st menu_main[] = {
 	{ "Display",			XEMUGUI_MENUID_SUBMENU,		menu_display, NULL },
-	{ "Reset C65",  		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, c65_reset },
+	{ "Reset C65",  		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, c65_reset_asked },
 	{ "Attach D81",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_attach_d81_by_browsing },
 //	{ "Browse system folder",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_native_os_file_browser },
-#ifdef _WIN32
+#ifdef XEMU_ARCH_WIN
 	{ "System console", XEMUGUI_MENUID_CALLABLE | XEMUGUI_MENUFLAG_QUERYBACK, xemugui_cb_sysconsole, NULL },
 #endif
+	{ "About", XEMUGUI_MENUID_CALLABLE, xemugui_cb_about_window, NULL },
 	{ "Quit", XEMUGUI_MENUID_CALLABLE, xemugui_cb_call_quit_if_sure, NULL },
 	{ NULL }
 };
