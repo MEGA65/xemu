@@ -58,10 +58,10 @@ static const Uint8 matrix_alt_to_ascii[MAT2ASC_TAB_SIZE]    ={0x00,0x00,0x00,0x0
 static const Uint8 *matrix_to_ascii_table_selector[32] = {
 	matrix_normal_to_ascii,  matrix_shift_to_ascii,   matrix_shift_to_ascii,   matrix_shift_to_ascii,
 	matrix_control_to_ascii, matrix_control_to_ascii, matrix_control_to_ascii, matrix_control_to_ascii,
-	matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,	// CBM key has priority
-	matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,	// CBM key has priority
-	matrix_alt_to_ascii,     matrix_alt_to_ascii,     matrix_alt_to_ascii,     matrix_alt_to_ascii,     
-	matrix_alt_to_ascii,     matrix_alt_to_ascii,     matrix_alt_to_ascii,     matrix_alt_to_ascii,     
+	matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,		// CBM key has priority
+	matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,		// CBM key has priority
+	matrix_alt_to_ascii,     matrix_alt_to_ascii,     matrix_alt_to_ascii,     matrix_alt_to_ascii,
+	matrix_alt_to_ascii,     matrix_alt_to_ascii,     matrix_alt_to_ascii,     matrix_alt_to_ascii,
 	matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,
 	matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii,     matrix_cbm_to_ascii
 };
@@ -76,6 +76,13 @@ static struct {
 } hwa_kbd;
 
 static int restore_is_held = 0;
+
+
+void hwa_kbd_fake_key ( Uint8 k )
+{
+	hwa_kbd.next = 0;
+	hwa_kbd.last = k;
+}
 
 
 /* used by actual I/O function to read $D610 */
@@ -234,14 +241,14 @@ int emu_callback_key ( int pos, SDL_Scancode key, int pressed, int handled )
 		} else if (key == SDL_SCANCODE_KP_ENTER) {
 			c64_toggle_joy_emu();
 			OSD(-1, -1, "Joystick emulation on port #%d", joystick_emu);
-		} else if (((hwa_kbd.modifiers & (MODKEY_LSHIFT | MODKEY_RSHIFT)) == (MODKEY_LSHIFT | MODKEY_RSHIFT)) && set_mouse_grab(SDL_FALSE)) {
+		} else if (((hwa_kbd.modifiers & (MODKEY_LSHIFT | MODKEY_RSHIFT)) == (MODKEY_LSHIFT | MODKEY_RSHIFT)) && set_mouse_grab(SDL_FALSE, 0)) {
 			DEBUGPRINT("UI: mouse grab cancelled" NL);
 		}
 	} else {
 		if (pos == RESTORE_KEY_POS)
 			restore_is_held = 0;
 		if (pos == -2 && key == 0) {	// special case pos = -2, key = 0, handled = mouse button (which?) and release event!
-			if ((handled == SDL_BUTTON_LEFT) && set_mouse_grab(SDL_TRUE)) {
+			if ((handled == SDL_BUTTON_LEFT) && set_mouse_grab(SDL_TRUE, 0)) {
 				OSD(-1, -1, "Mouse grab activated. Press\nboth SHIFTs together to cancel.");
 				DEBUGPRINT("UI: mouse grab activated" NL);
 			}

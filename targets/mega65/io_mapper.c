@@ -38,9 +38,18 @@ Uint8  D6XX_registers[0x100];		// mega65 specific D6XX range, excluding the UART
 Uint8  D7XX[0x100];			// FIXME: hack for future M65 stuffs like ALU! FIXME: no snapshot on these!
 struct Cia6526 cia1, cia2;		// CIA emulation structures for the two CIAs
 static int mouse_x = 0, mouse_y = 0;	// for our primitive C1351 mouse emulation
-int    cpu_linear_memory_addressing_is_enabled = 0;	// used by the CPU emu as well!
+int    cpu_mega65_opcodes = 0;	// used by the CPU emu as well!
 static int bigmult_valid_result = 0;
-int port_d607 = 0xFF;	// ugly hack to be able to read extra char row of C65
+int port_d607 = 0xFF;			// ugly hack to be able to read extra char row of C65
+int mega65_model = 0xFF;		// $FF = Xemu/others, 1/2/3 = MEGA65 PCB rev 1/2/3, $40=nexys4, $41=nexys4ddr, $42=nexys4ddr-widget, $FD=wukong, $FE=simulation
+
+
+static const Uint8 fpga_firmware_version[] = { 'X','e','m','u' };
+static const Uint8 cpld_firmware_version[] = { 'N','o','w','!' };
+#define xemu_query_interface_str XEMU_BUILDINFO_CDATE
+static const char *xemu_query_interface_p = NULL;
+static int         xemu_query_gate = 0;
+
 
 
 #define RETURN_ON_IO_READ_NOT_IMPLEMENTED(func, fb) \
@@ -159,7 +168,7 @@ Uint8 io_read ( unsigned int addr )
 			addr &= 0xFF;
 			if (addr < 9)
 				RETURN_ON_IO_READ_NOT_IMPLEMENTED("UART", 0xFF);	// FIXME: UART is not yet supported!
-			if (addr >= 0x80 && addr <= 0x93)	// SDcard controller etc of Mega65
+			if (addr >= 0x80 && addr <= 0x93)	// SDcard controller etc of MEGA65
 				return sdcard_read_register(addr - 0x80);
 			if ((addr & 0xF0) == 0xE0)
 				return eth65_read_reg(addr);
@@ -184,8 +193,35 @@ Uint8 io_read ( unsigned int addr )
 					return hwa_kbd_get_last();
 				case 0x11:				// modifier keys on kbd being used
 					return hwa_kbd_get_modifiers();
+				case 0x29:
+					return mega65_model;		// MEGA65 model
+				case 0x32: // D632-D635: FPGA firmware ID
+				case 0x33:
+				case 0x34:
+				case 0x35:
+					if (xemu_query_gate == 0xF) {
+						Uint8 data = *xemu_query_interface_p;
+						//if (!data)
+						//	xemu_query_gate = 0;
+						return data;
+					} else {
+						return fpga_firmware_version[addr - 0x32];
+					}
+				case 0x2C: // D62C-D62F: CPLD firmware ID
+				case 0x2D:
+				case 0x2E:
+				case 0x2F:
+					if (xemu_query_gate == 0xF) {
+						Uint8 data = *xemu_query_interface_p++;
+						if (!data) {
+							xemu_query_gate = 0;
+						}
+						return data;
+					} else {
+						return cpld_firmware_version[addr - 0x2C];
+					}
 				default:
-					DEBUG("MEGA65: reading Mega65 specific I/O @ $D6%02X result is $%02X" NL, addr, D6XX_registers[addr]);
+					DEBUG("MEGA65: reading MEGA65 specific I/O @ $D6%02X result is $%02X" NL, addr, D6XX_registers[addr]);
 					return D6XX_registers[addr];
 			}
 		case 0x17:	// $D700-$D7FF ~ C65 I/O mode
@@ -370,7 +406,7 @@ void io_write ( unsigned int addr, Uint8 data )
 				} else
 					RETURN_ON_IO_WRITE_NOT_IMPLEMENTED("UART");	// FIXME: UART is not yet supported!
 			}
-			if (addr >= 0x80 && addr <= 0x93) {			// SDcard controller etc of Mega65
+			if (addr >= 0x80 && addr <= 0x93) {			// SDcard controller etc of MEGA65
 				sdcard_write_register(addr - 0x80, data);
 				return;
 			}
@@ -387,9 +423,9 @@ void io_write ( unsigned int addr, Uint8 data )
 					return;
 				case 0x7D:
 					DEBUG("MEGA65: features set as $%02X" NL, data);
-					if ((data & 2) != cpu_linear_memory_addressing_is_enabled) {
-						DEBUG("MEGA65: 32-bit linear addressing opcodes have been turned %s." NL, data & 2 ? "ON" : "OFF");
-						cpu_linear_memory_addressing_is_enabled = data & 2;
+					if ((data & 2) != cpu_mega65_opcodes) {
+						DEBUG("MEGA65: enhanced opcodes have been turned %s." NL, data & 2 ? "ON" : "OFF");
+						cpu_mega65_opcodes = data & 2;
 					}
 					if ((data & 4) != rom_protect) {
 						DEBUG("MEGA65: ROM protection has been turned %s." NL, data & 4 ? "ON" : "OFF");
@@ -404,6 +440,22 @@ void io_write ( unsigned int addr, Uint8 data )
 					return;
 				case 0x7F:	// hypervisor leave
 					hypervisor_leave();	// 0x67F is also handled on enter's state, so it will be executed only in_hypervisor mode, which is what I want
+					return;
+				case 0x32:
+				case 0x33:
+				case 0x34:
+				case 0x35:
+					if (data == (cpld_firmware_version[addr - 0x32] ^ fpga_firmware_version[addr - 0x32])) {
+						DEBUG("QUERY: before gating: %X" NL, xemu_query_gate);
+						xemu_query_gate |= (1 << (addr - 0x32));
+						if (xemu_query_gate == 0xF)
+							xemu_query_interface_p = xemu_query_interface_str;
+					} else {
+						xemu_query_gate = 0;
+					}
+					DEBUG("QUERY: $D6%02X reg written with data %02X excepted %02X gate is %1X ptr is %p" NL,
+							addr, data, cpld_firmware_version[addr - 0x32] ^ fpga_firmware_version[addr - 0x32],
+							xemu_query_gate, xemu_query_interface_p);
 					return;
 				default:
 					DEBUG("MEGA65: this I/O port is not emulated in Xemu yet: $D6%02X (tried to be written with $%02X)" NL, addr, data);

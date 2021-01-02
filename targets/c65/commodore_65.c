@@ -1,4 +1,5 @@
-/* Test-case for a very simple, inaccurate, work-in-progress Commodore 65 emulator.
+/* Test-case for simple, work-in-progress Commodore 65 emulator.
+   Part of the Xemu project, please visit: https://github.com/lgblgblgb/xemu
    Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
@@ -32,6 +33,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #include "c65_snapshot.h"
 #include "xemu/emutools_gui.h"
 #include "ui.h"
+#include "inject.h"
 
 
 
@@ -731,35 +733,42 @@ void cpu65_write_rmw_callback ( Uint16 addr, Uint8 old_data, Uint8 new_data )
 }
 
 
+int dump_memory ( const char *fn )
+{
+        if (fn && *fn) {
+                DEBUGPRINT("MEM: Dumping memory into file: %s" NL, fn);
+                return xemu_save_file(fn, memory, 0x20000, "Cannot dump memory into file");
+        } else {
+                return 0;
+        }
+}
+
 
 static void shutdown_callback ( void )
 {
-#ifdef MEMDUMP_FILE
-	FILE *f;
-#endif
 	int a;
 	for (a = 0; a < 0x40; a++)
 		DEBUG("VIC-3 register $%02X is %02X" NL, a, vic3_registers[a]);
 	cia_dump_state (&cia1);
 	cia_dump_state (&cia2);
-#ifdef MEMDUMP_FILE
-	// Dump memory, so some can inspect the result (low 128K, RAM only)
-	f = fopen(MEMDUMP_FILE, "wb");
-	if (f) {
-		fwrite(memory, 1, 0x20000, f);
-		fclose(f);
-		DEBUG("Memory is dumped into " MEMDUMP_FILE NL);
-	}
+#if !defined(XEMU_ARCH_HTML)
+	(void)dump_memory(xemucfg_get_str("dumpmem"));
 #endif
-	printf("Scanline render info = \"%s\"" NL, scanline_render_debug_info);
+	DEBUGPRINT("Scanline render info = \"%s\"" NL, scanline_render_debug_info);
+	DEBUGPRINT("VIC3: D011=$%02X D018=$%02X D030=$%02X D031=$%02X" NL,
+		vic3_registers[0x11], vic3_registers[0x18], vic3_registers[0x30], vic3_registers[0x31]
+	);
 	DEBUG("Execution has been stopped at PC=$%04X [$%05X]" NL, cpu65.pc, addr_trans_rd[cpu65.pc >> 12] + cpu65.pc);
 }
 
 
-void c65_reset_asked ( void )
+int c65_reset_asked ( void )
 {
-	if (ARE_YOU_SURE("Are you sure to HARD RESET your Commodore-65?", i_am_sure_override | ARE_YOU_SURE_DEFAULT_YES))
+	if (ARE_YOU_SURE("Are you sure to HARD RESET your Commodore-65?", i_am_sure_override | ARE_YOU_SURE_DEFAULT_YES)) {
 		c65_reset();
+		return 1;
+	} else
+		return 0;
 }
 
 void c65_reset ( void )
@@ -789,7 +798,7 @@ int emu_callback_key ( int pos, SDL_Scancode key, int pressed, int handled )
 		} else if (key == SDL_SCANCODE_RSHIFT) {
 			shift_status |= 2;
 		}
-		if (shift_status == 3 && set_mouse_grab(SDL_FALSE)) {
+		if (shift_status == 3 && set_mouse_grab(SDL_FALSE, 0)) {
 			DEBUGPRINT("UI: mouse grab cancelled" NL);
 		}
 	} else {
@@ -798,7 +807,7 @@ int emu_callback_key ( int pos, SDL_Scancode key, int pressed, int handled )
 		} else if (key == SDL_SCANCODE_RSHIFT) {
 			shift_status &= 1;
 		} else if (pos == -2 && key == 0) {	// special case pos = -2, key = 0, handled = mouse button (which?) and release event!
-			if (handled == SDL_BUTTON_LEFT && set_mouse_grab(SDL_TRUE)) {
+			if (handled == SDL_BUTTON_LEFT && set_mouse_grab(SDL_TRUE, 0)) {
 				OSD(-1, -1, "Mouse grab activated. Press\nboth SHIFTs together to cancel.");
 				DEBUGPRINT("UI: mouse grab activated" NL);
 			}
@@ -811,8 +820,36 @@ int emu_callback_key ( int pos, SDL_Scancode key, int pressed, int handled )
 }
 
 
+#ifdef XEMU_FILES_SCREENSHOT_SUPPORT
+int register_screenshot_request = 0;
+static inline void do_pending_screenshot ( void )
+{
+	if (!register_screenshot_request)
+		return;
+	register_screenshot_request = 0;
+	if (!xemu_screenshot_png(
+		NULL, NULL,
+		1,
+		2,
+		NULL,	// allow function to figure it out ;)
+		SCREEN_WIDTH,
+		SCREEN_HEIGHT
+	)) {
+		const char *p = strrchr(xemu_screenshot_full_path, DIRSEP_CHR);
+		if (p)
+			OSD(-1, -1, "%s", p + 1);
+	}
+}
+#endif
+
+
 static void update_emulator ( void )
 {
+#ifdef XEMU_FILES_SCREENSHOT_SUPPORT
+	// DO call this _RIGHT BEFORE_ xemu_update_screen() otherwise the texture
+	// does not exist anymore OR not the full frame is rendered yet for screenshot!
+	do_pending_screenshot();
+#endif
 	xemu_update_screen();
 	hid_handle_all_sdl_events();
 	xemugui_iteration();
@@ -821,8 +858,8 @@ static void update_emulator ( void )
 	// Ugly CIA trick to maintain realtime TOD in CIAs :)
 	const struct tm *t = xemu_get_localtime();
 	const Uint8 sec10ths = xemu_get_microseconds() / 100000;
-	cia_ugly_tod_updater(&cia1, t, sec10ths);
-	cia_ugly_tod_updater(&cia2, t, sec10ths);
+	cia_ugly_tod_updater(&cia1, t, sec10ths, 0);
+	cia_ugly_tod_updater(&cia2, t, sec10ths, 0);
 }
 
 
@@ -843,7 +880,9 @@ static void emulation_loop ( void )
 			cia_tick(&cia1, 64);
 			cia_tick(&cia2, 64);
 			cycles -= cpu_cycles_per_scanline;
-			if (vic3_render_scanline()) {
+			if (XEMU_UNLIKELY(vic3_render_scanline())) {
+				if (XEMU_UNLIKELY(inject_ready_check_status))
+					inject_ready_check_do();
 				if (frameskip) {
 					frameskip = 0;
 					hostfs_flush_all();
@@ -870,7 +909,9 @@ int main ( int argc, char **argv )
 	//int cycles;
 	xemu_pre_init(APP_ORG, TARGET_NAME, "The Unusable Commodore 65 emulator from LGB");
 	xemucfg_define_str_option("8", NULL, "Path of the D81 disk image to be attached");
+	xemucfg_define_switch_option("allowmousegrab", "Allow auto mouse grab with left-click");
 	xemucfg_define_switch_option("d81ro", "Force read-only status for image specified with -8 option");
+	xemucfg_define_switch_option("driveled", "Render drive LED at the top right corner of the screen");
 	xemucfg_define_num_option("dmarev", 2, "Revision of the DMAgic chip (0/1=F018A/B, 2=rom_auto, +512=modulo))");
 	xemucfg_define_switch_option("fullscreen", "Start in fullscreen mode");
 	xemucfg_define_str_option("hostfsdir", NULL, "Path of the directory to be used as Host-FS base");
@@ -878,10 +919,13 @@ int main ( int argc, char **argv )
 	xemucfg_define_str_option("rom", "#c65-system.rom", "Override system ROM path to be loaded");
 	xemucfg_define_str_option("keymap", KEYMAP_USER_FILENAME, "Set keymap configuration file to be used");
 	xemucfg_define_str_option("gui", NULL, "Select GUI type for usage. Specify some insane str to get a list");
+	xemucfg_define_str_option("dumpmem", NULL, "Save memory content on exit");
 #ifdef FAKE_TYPING_SUPPORT
 	xemucfg_define_switch_option("go64", "Go into C64 mode after start");
 	xemucfg_define_switch_option("autoload", "Load and start the first program from disk");
 #endif
+	xemucfg_define_str_option("prg", NULL, "Load a PRG file directly into the memory (/w C64/65 auto-detection on load address)");
+	xemucfg_define_num_option("prgmode", 0, "Override auto-detect option for -prg (64 or 65 for C64/C65 modes, 0 = default, auto detect)");
 #ifdef XEMU_SNAPSHOT_SUPPORT
 	xemucfg_define_str_option("snapload", NULL, "Load a snapshot from the given file");
 	xemucfg_define_str_option("snapsave", NULL, "Save a snapshot into the given file before Xemu would exit");
@@ -890,7 +934,9 @@ int main ( int argc, char **argv )
 	xemucfg_define_switch_option("besure", "Skip asking \"are you sure?\" on RESET or EXIT");
 	if (xemucfg_parse_all(argc, argv))
 		return 1;
+	show_drive_led = xemucfg_get_bool("driveled");
 	i_am_sure_override = xemucfg_get_bool("besure");
+	allow_mouse_grab = xemucfg_get_bool("allowmousegrab");
 	/* Initiailize SDL - note, it must be before loading ROMs, as it depends on path info from SDL! */
 	window_title_info_addon = emulator_speed_title;
         if (xemu_post_init(
@@ -915,7 +961,8 @@ int main ( int argc, char **argv )
 	);
 	osd_init_with_defaults();
 	xemugui_init(xemucfg_get_str("gui"));
-	// Start!!
+	if (xemucfg_get_str("prg"))
+		inject_register_prg(xemucfg_get_str("prg"), xemucfg_get_num("prgmode"));
 #ifdef FAKE_TYPING_SUPPORT
 	if (xemucfg_get_bool("go64")) {
 		if (xemucfg_get_bool("autoload"))
@@ -981,7 +1028,7 @@ int c65emu_snapshot_save_state ( const struct xemu_snapshot_definition_st *def )
 int c65emu_snapshot_loading_finalize ( const struct xemu_snapshot_definition_st *def, struct xemu_snapshot_block_st *block )
 {
 	apply_memory_config();
-	printf("SNAP: loaded (finalize-callback!)." NL);
+	DEBUGPRINT("SNAP: loaded (finalize-callback!)." NL);
 	return 0;
 }
 #endif

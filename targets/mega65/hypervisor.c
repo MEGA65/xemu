@@ -1,6 +1,6 @@
 /* A work-in-progess MEGA65 (Commodore 65 clone origins) emulator
    Part of the Xemu project, please visit: https://github.com/lgblgblgb/xemu
-   Copyright (C)2016-2019 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -189,7 +189,7 @@ void hypervisor_enter ( int trapno )
 }
 
 
-// Actual (CPU level opcode execution) emulation of Mega65 should start with calling this function (surely after initialization of every subsystems etc).
+// Actual (CPU level opcode execution) emulation of MEGA65 should start with calling this function (surely after initialization of every subsystems etc).
 void hypervisor_start_machine ( void )
 {
 	in_hypervisor = 0;
@@ -237,6 +237,7 @@ void hypervisor_leave ( void )
 	memory_set_vic3_rom_mapping(vic_registers[0x30]);	// restore possible active VIC-III mapping
 	memory_set_do_map();	// restore mapping ...
 	if (XEMU_UNLIKELY(first_hypervisor_leave)) {
+		DEBUGPRINT("HYPERVISOR: first return after RESET." NL);
 		first_hypervisor_leave = 0;
 		int new_pc = refill_c65_rom_from_preinit_cache();	// this function should decide then, if it's really a (forced) thing to do ...
 		if (new_pc >= 0) {
@@ -246,7 +247,7 @@ void hypervisor_leave ( void )
 			);
 			cpu65.pc = new_pc;
 		} else
-			DEBUGPRINT("MEM: no force ROM re-apply policy was requested" NL);
+			DEBUGPRINT("MEM: no forced ROM re-apply policy was requested" NL);
 		dma_init_set_rev(xemucfg_get_num("dmarev"), main_ram + 0x20000 + 0x16);
 	}
 	if (XEMU_UNLIKELY(hypervisor_queued_trap >= 0)) {
@@ -302,6 +303,7 @@ void hypervisor_debug_invalidate ( const char *reason )
 
 void hypervisor_debug ( void )
 {
+	static int do_execution_range_check = 1;
 	if (!in_hypervisor)
 		return;
 	// TODO: better hypervisor upgrade check, maybe with checking the exact range kickstart uses for upgrade outside of the "normal" hypervisor mem range
@@ -309,13 +311,23 @@ void hypervisor_debug ( void )
 		DEBUG("HYPERVISOR-DEBUG: allowed to run outside of hypervisor memory, no debug info, PC = $%04X" NL, cpu65.pc);
 		return;
 	}
-	if (XEMU_UNLIKELY((cpu65.pc & 0xC000) != 0x8000)) {
+	if (XEMU_UNLIKELY((cpu65.pc & 0xC000) != 0x8000 && do_execution_range_check)) {
 		DEBUG("HYPERVISOR-DEBUG: execution outside of the hypervisor memory, PC = $%04X" NL, cpu65.pc);
-		ERROR_WINDOW("Hypervisor fatal error: execution outside of the hypervisor memory, PC=$%04X SP=$%04X", cpu65.pc, cpu65.sphi | cpu65.s);
-		if (QUESTION_WINDOW("Reset|Exit Xemu", "What to do now?"))
-			XEMUEXIT(1);
-		else
-			hypervisor_start_machine();
+		char msg[128];
+		sprintf(msg, "Hypervisor fatal error: execution outside of the hypervisor memory, PC=$%04X SP=$%04X", cpu65.pc, cpu65.sphi | cpu65.s);
+		switch (QUESTION_WINDOW("Reset|Exit Xemu|Ignore now|Ingore all", msg)) {
+			case 0:
+				hypervisor_start_machine();
+				break;
+			case 1:
+				XEMUEXIT(1);
+				break;
+			case 2:
+				break;
+			case 3:
+				do_execution_range_check = 0;
+				break;
+		}
 		return;
 	}
 	if (!resolver_ok) {

@@ -5,7 +5,7 @@
    This is the VIC-IV "emulation". Currently it does one-frame-at-once
    kind of horrible work, and only a subset of VIC2 and VIC3 knowledge
    is implemented, with some light VIC-IV features, to be able to "boot"
-   of Mega-65 with standard configuration (kickstart, SD-card).
+   of MEGA65 with standard configuration (kickstart, SD-card).
    Some of the missing features (VIC-2/3): hardware attributes,
    DAT, sprites, screen positioning, H1280 mode, V400 mode, interlace,
    chroma killer, VIC2 MCM, ECM, 38/24 columns mode, border.
@@ -27,11 +27,13 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 
 #include "xemu/emutools.h"
+#include "xemu/emutools_files.h"
 #include "mega65.h"
 #include "xemu/cpu65.h"
 #include "vic4.h"
 #include "vic4_palette.h"
 #include "memory_mapper.h"
+#include "xemu/f011_core.h"
 
 //#define RGB(r,g,b) rgb_palette[((r) << 8) | ((g) << 4) | (b)]
 
@@ -56,10 +58,10 @@ static Uint8 *sprite_bank;
 int vic3_blink_phase;			// blinking attribute helper, state.
 static Uint8 raster_colours[512];
 Uint8 c128_d030_reg;			// C128-like register can be only accessed in VIC-II mode but not in others, quite special!
+int show_drive_led;
+static Uint32 black_colour, red_colour;	// needed for drive LED
 
 int vic_vidp_legacy = 1, vic_chrp_legacy = 1, vic_sprp_legacy = 1;
-
-static int warn_sprites = 0, warn_ctrl_b_lo = 1;
 
 #if 0
 // UGLY: decides to use VIC-II/III method (val!=0), or the VIC-IV "precise address" selection (val == 0)
@@ -106,6 +108,10 @@ static inline void PIXEL_POINTER_FINAL_ASSERT ( Uint32 *p )
 
 void vic_init ( void )
 {
+	// Needed to render "drive LED" feature
+	red_colour   = SDL_MapRGBA(sdl_pix_fmt, 0xFF, 0x00, 0x00, 0xFF);
+	black_colour = SDL_MapRGBA(sdl_pix_fmt, 0x00, 0x00, 0x00, 0xFF);
+	// Init VIC4 palette
 	vic4_init_palette();
 	force_fast = 0;
 	// *** Init VIC3 registers and palette
@@ -281,10 +287,6 @@ void vic_write_reg ( unsigned int addr, Uint8 data )
 		CASE_VIC_3_4(0x31):
 			vic_registers[0x31] = data;	// we need this work-around, since reg-write happens _after_ this switch statement, but machine_set_speed above needs it ...
 			machine_set_speed(0);
-			if ((data & 15) && warn_ctrl_b_lo) {
-				INFO_WINDOW("VIC3 control-B register V400, H1280, MONO and INT features are not emulated yet!");
-				warn_ctrl_b_lo = 0;
-			}
 			return;				// since we DID the write, it's OK to return here and not using "break"
 		CASE_VIC_3_4(0x32): CASE_VIC_3_4(0x33): CASE_VIC_3_4(0x34): CASE_VIC_3_4(0x35): CASE_VIC_3_4(0x36): CASE_VIC_3_4(0x37): CASE_VIC_3_4(0x38):
 		CASE_VIC_3_4(0x39): CASE_VIC_3_4(0x3A): CASE_VIC_3_4(0x3B): CASE_VIC_3_4(0x3C): CASE_VIC_3_4(0x3D): CASE_VIC_3_4(0x3E): CASE_VIC_3_4(0x3F):
@@ -425,7 +427,13 @@ Uint8 vic_read_reg ( int unsigned addr )
 			break;
 		/* --- NO MORE VIC-III REGS FROM HERE --- */
 		CASE_VIC_4(0x48): CASE_VIC_4(0x49): CASE_VIC_4(0x4A): CASE_VIC_4(0x4B): CASE_VIC_4(0x4C): CASE_VIC_4(0x4D): CASE_VIC_4(0x4E): CASE_VIC_4(0x4F):
-		CASE_VIC_4(0x50): CASE_VIC_4(0x51): CASE_VIC_4(0x52): CASE_VIC_4(0x53):
+		CASE_VIC_4(0x50): CASE_VIC_4(0x51):
+			break;
+		CASE_VIC_4(0x52):
+			result = (scanline << 1) & 0xFF;	// hack: report phys raster always double of vic-II raster
+			break;
+		CASE_VIC_4(0x53):
+			result = ((scanline << 1) >> 8) & 7;
 			break;
 		CASE_VIC_4(0x54):
 			break;
@@ -476,7 +484,7 @@ static inline Uint8 *vic2_get_chargen_pointer ( void )
 		//int crom = vic_registers[0x30] & 64;
 		//DEBUG("VIC2: chargen: BANK=%04X OFS=%04X CROM=%d" NL, vic2_16k_bank, offs, crom);
 		if ((vic2_16k_bank == 0x0000 || vic2_16k_bank == 0x8000) && (offs == 0x1000 || offs == 0x1800)) {  // check if chargen info is in ROM
-			// In case of Mega65, fetching char-info from ROM means to access the "WOM"
+			// In case of MEGA65, fetching char-info from ROM means to access the "WOM"
 			// FIXME: what should I do with bit 6 of VIC-III register $30 ["CROM"] ?!
 			return char_wom + offs - 0x1000;
 		} else
@@ -501,7 +509,7 @@ static inline void vic2_render_screen_text ( Uint32 *p, int tail )
 	Uint8 *vidp, *colp = colour_ram;
 	int x = 0, y = 0, xlim, ylim, charline = 0;
 	Uint8 *chrg = vic2_get_chargen_pointer();
-	int inc_p = (vic_registers[0x54] & 1) ? 2 : 1;	// VIC-IV (Mega-65) 16 bit text mode?
+	int inc_p = (vic_registers[0x54] & 1) ? 2 : 1;	// VIC-IV (MEGA65) 16 bit text mode?
 	int scanline = 0;
 	if (vic_registers[0x31] & 128) { // check H640 bit: 80 column mode?
 		xlim = 79;
@@ -524,7 +532,7 @@ static inline void vic2_render_screen_text ( Uint32 *p, int tail )
 	if (!vic_sprp_legacy) {
 		sprite_pointers = main_ram + ((vic_registers[0x6C] | (vic_registers[0x6D] << 8) | (vic_registers[0x6E] << 16)) & ((512 << 10) - 1));
 	}
-	//DEBUGPRINT("VIC4: vidp = %u, vic_vidp_legacy=%d" NL, (unsigned int)(vidp - main_ram), vic_vidp_legacy);
+	//DEBUGPRINT("VIC4: vidp = $%X, vic_vidp_legacy=%X" NL, (unsigned int)(vidp - main_ram), vic_vidp_legacy);
 	// Target SDL pixel related format for the background colour
 	bg = palette[BG_FOR_Y(0)];
 	PIXEL_POINTER_CHECK_INIT(p, tail, "vic2_render_screen_text");
@@ -697,7 +705,7 @@ static inline void vic3_render_screen_bpm ( Uint32 *p, int tail )
 		xlim = 39;
 		sprite_pointers = bp[2] + 0x1FF8;	// FIXME: just guessing
 	}
-        DEBUG("VIC3: bitplanes: enable_mask=$%02X comp_mask=$%02X H640=%d" NL,
+	DEBUG("VIC3: bitplanes: enable_mask=$%02X comp_mask=$%02X H640=%d" NL,
 		bpe, vic_registers[0x3B], h640 ? 1 : 0
 	);
 	PIXEL_POINTER_CHECK_INIT(p, tail, "vic3_render_screen_bpm");
@@ -905,17 +913,38 @@ void vic_render_screen ( void )
 			vic2_render_screen_text(p_sdl, tail_sdl);
 	}
 	if (sprites) {	// Render sprites. VERY BAD. We ignore sprite priority as well (cannot be behind the background)
-		int a;
-		if (warn_sprites) {
-			INFO_WINDOW("WARNING: Sprite emulation is really bad! (enabled_mask=$%02X)", sprites);
-			warn_sprites = 0;
-		}
-		for (a = 7; a >= 0; a--) {
+		//if (warn_sprites) {
+		//	INFO_WINDOW("WARNING: Sprite emulation is really bad! (enabled_mask=$%02X)", sprites);
+		//	warn_sprites = 0;
+		//}
+		for (int a = 7; a >= 0; a--) {
 			int mask = 1 << a;
 			if ((sprites & mask))
 				render_sprite(a, mask, sprite_bank + (sprite_pointers[a] << 6), p_sdl, tail_sdl);	// sprite_pointers are set by the renderer functions above!
 		}
 	}
+#ifdef XEMU_FILES_SCREENSHOT_SUPPORT
+	// Screenshot
+	if (XEMU_UNLIKELY(register_screenshot_request)) {
+		register_screenshot_request = 0;
+		if (!xemu_screenshot_png(
+			NULL, NULL,
+			1,
+			2,
+			NULL,	// allow function to figure it out ;)
+			SCREEN_WIDTH,
+			SCREEN_HEIGHT
+		)) {
+			const char *p = strrchr(xemu_screenshot_full_path, DIRSEP_CHR);
+			if (p)
+				OSD(-1, -1, "%s", p + 1);
+		}
+	}
+#endif
+	if (show_drive_led && fdc_get_led_state(16))
+		for (int y = 0; y < 8; y++)
+			for (int x = 0; x < 8; x++)
+				*(p_sdl + (SCREEN_WIDTH) - 10 + x + (y + 2) * (SCREEN_WIDTH)) = x > 1 && x < 7 && y > 1 && y < 7 ? red_colour : black_colour;
 	xemu_update_screen();
 }
 

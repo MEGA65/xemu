@@ -1,4 +1,4 @@
-/* Xemu - Somewhat lame emulation (running on Linux/Unix/Windows/OSX, utilizing
+/* Xemu - emulation (running on Linux/Unix/Windows/OSX, utilizing
    SDL2) of some 8 bit machines, including the Commodore LCD and Commodore 65
    and MEGA65 as well.
    Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
@@ -23,14 +23,16 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #ifndef XEMU_COMMON_EMUTOOLS_H_INCLUDED
 #define XEMU_COMMON_EMUTOOLS_H_INCLUDED
 
-#ifdef XEMU_ARCH_OSX
-// It seems SDL2 on OSX produces LOTS of warning because of usage 'memset_pattern4'.
-// It seems SDL2 has a bug not including header string.h which is the place where that function is defined on OSX.
-// Let's try to fix that, by manually including string.h here ...
-#include <string.h>
-#endif
 #include <SDL.h>
 #include "xemu/emutools_basicdefs.h"
+
+#ifndef XEMU_NO_SDL_DIALOG_OVERRIDE
+extern int (*SDL_ShowSimpleMessageBox_custom)(Uint32, const char*, const char*, SDL_Window* );
+extern int (*SDL_ShowMessageBox_custom)(const SDL_MessageBoxData*, int* );
+#else
+#define SDL_ShowSimpleMessageBox_custom SDL_ShowSimpleMessageBox
+#define SDL_ShowMessageBox_custom	SDL_ShowMessageBox
+#endif
 
 #ifdef XEMU_ARCH_HTML
 #include <emscripten.h>
@@ -38,7 +40,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #define MSG_POPUP_WINDOW(sdlflag, title, msg, win) \
 	do { if (1 || sdlflag == SDL_MESSAGEBOX_ERROR) { EM_ASM_INT({ window.alert(Pointer_stringify($0)); }, msg); } } while(0)
 #else
-#define MSG_POPUP_WINDOW(sdlflag, title, msg, win) SDL_ShowSimpleMessageBox(sdlflag, title, msg, win)
+#define MSG_POPUP_WINDOW(sdlflag, title, msg, win) SDL_ShowSimpleMessageBox_custom(sdlflag, title, msg, win)
 #define INSTALL_DIRECTORY_ENTRY_NAME "default-files"
 #endif
 
@@ -67,10 +69,12 @@ extern void clear_emu_events ( void );
 
 extern void xemu_drop_events ( void );
 
-extern int  set_mouse_grab ( SDL_bool state );
+extern int  set_mouse_grab ( SDL_bool state, int force_allow );
 extern SDL_bool is_mouse_grab ( void );
 extern void save_mouse_grab ( void );
 extern void restore_mouse_grab ( void );
+
+extern int allow_mouse_grab;
 
 static XEMU_INLINE int CHECK_SNPRINTF( int ret, int limit )
 {
@@ -131,10 +135,13 @@ extern int seconds_timer_trigger;
 extern char *sdl_pref_dir, *sdl_base_dir, *sdl_inst_dir;
 extern int sysconsole_is_open;
 extern int sdl_default_win_x_size, sdl_default_win_y_size;
+extern SDL_version sdlver_compiled, sdlver_linked;
+extern Uint32 *xemu_frame_pixel_access_p;
 
 extern int xemu_init_debug ( const char *fn );
 extern time_t xemu_get_unixtime ( void );
 extern struct tm *xemu_get_localtime ( void );
+extern Uint8 xemu_hour_to_bcd12h ( Uint8 hours, int hour_offset );
 extern unsigned int xemu_get_microseconds ( void );
 extern void *xemu_malloc ( size_t size );
 extern void *xemu_realloc ( void *p, size_t size );

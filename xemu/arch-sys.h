@@ -15,10 +15,10 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
-#ifdef	XEMU_XEMU_ARCH_SYS_H_INCLUDED
+#ifdef	XEMU_COMMON_ARCH_SYS_H_INCLUDED
 #	error "xemu/arch-sys.h cannot be included multiple times (and it's included by C compiler command line)."
 #endif
-#define	XEMU_XEMU_ARCH_SYS_H_INCLUDED
+#define	XEMU_COMMON_ARCH_SYS_H_INCLUDED
 
 #ifndef	_ISOC11_SOURCE
 #	define	_ISOC11_SOURCE
@@ -93,3 +93,12 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #	undef	_FILE_OFFSET_BITS
 #endif
 #define	_FILE_OFFSET_BITS	64
+
+#ifdef XEMU_ARCH_OSX
+	// MacOS and/or SDL bug: even if this prototype is in string.h system header in MacOS,
+	// somehow it does not work even if string.h _IS_ included. So I have to create my
+	// own prototype for this function here :-O For the prototype, we also need the stddef.h
+	// though, for the "size_t".
+#	include <stddef.h>
+	void memset_pattern4(void *__b, const void *__pattern4, size_t __len);
+#endif

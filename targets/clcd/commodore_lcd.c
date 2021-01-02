@@ -1,5 +1,5 @@
-/* Commodore LCD emulator.
-   Copyright (C)2016-2019 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+/* Commodore LCD emulator (son of my world's first working Commodore LCD emulator)
+   Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
    Part of the Xemu project: https://github.com/lgblgblgb/xemu
 
    This is an ongoing work to rewrite my old Commodore LCD emulator:
@@ -35,16 +35,22 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #include "xemu/emutools_files.h"
 #include "xemu/emutools_hid.h"
 #include "xemu/emutools_config.h"
+#include "xemu/emutools_gui.h"
 #include "xemu/cpu65.h"
 #include "xemu/via65c22.h"
 #include "xemu/emutools.h"
+
 #include "commodore_lcd.h"
+
 #include <time.h>
 
 
 static const char *rom_fatal_msg = "This is one of the selected ROMs. Without it, Xemu won't work.\nInstall it, or use -romXXX CLI switches to specify another path, see the -h output for help.";
 
+static char emulator_addon_title[32] = "";
+
 static int cpu_mhz, cpu_cycles_per_tv_frame;
+static int register_screenshot_request = 0;
 
 static Uint8 memory[0x40000];
 static Uint8 charrom[4096];
@@ -62,6 +68,7 @@ static Uint8 keysel;
 static Uint8 rtc_regs[16];
 static int rtc_sel = 0;
 static int ram_size;
+static int keep_ram;
 
 static struct {
 	int phase;
@@ -338,14 +345,33 @@ static void render_screen ( void )
 			pix += tail;
 		}
 	}
+	if (XEMU_UNLIKELY(register_screenshot_request)) {
+		register_screenshot_request = 0;
+		if (!xemu_screenshot_png(
+			NULL, NULL,
+			SCREEN_DEFAULT_ZOOM,
+			SCREEN_DEFAULT_ZOOM,
+			NULL,	// Allow function to figure it out ;)
+			SCREEN_WIDTH,
+			SCREEN_HEIGHT
+		))
+			OSD(-1, -1, "Screenshot has been taken");
+	}
 	xemu_update_screen();
 }
 
+
+static const struct menu_st menu_main[];
 
 
 // HID needs this to be defined, it's up to the emulator if it uses or not ...
 int emu_callback_key ( int pos, SDL_Scancode key, int pressed, int handled )
 {
+	if (!pressed && pos == -2 && key == 0 && handled == SDL_BUTTON_RIGHT) {
+		DEBUGGUI("UI: handler has been called." NL);
+		if (xemugui_popup(menu_main))
+			DEBUGPRINT("UI: oops, POPUP does not worked :(" NL);
+	}
         return 0;
 }
 
@@ -397,6 +423,7 @@ static void update_emulator ( void )
 			memory[0x68] = addr >> 8;
 		}
 	}
+	xemugui_iteration();
 	render_screen();
 	hid_handle_all_sdl_events();
 	xemu_timekeeping_delay(40000);	// 40000 microseconds would be the real time for a full TV frame (see main() for more info: CLCD is not TV based for real ...)
@@ -407,6 +434,7 @@ static void update_emulator ( void )
 
 static void shutdown_emu ( void )
 {
+#if 0
 #ifndef __EMSCRIPTEN__
 	FILE *f = fopen("memory.dump", "wb");
 	if (f) {
@@ -414,7 +442,11 @@ static void shutdown_emu ( void )
 		fclose(f);
 	}
 #endif
-	printf("Shutting down ...\n");
+#endif
+	//if (keep_ram) {
+	//	xemu_save_file("@memory_saved.bin", memory, ram_size, "Cannot save memory content :(");
+	//}
+	DEBUGPRINT("Shutting down ..." NL);
 }
 
 
@@ -423,19 +455,19 @@ static void rom_list ( void )
 	//const char *defprg = xemucfg_get_str("defprg");
 	for (int addr = 0x20000; addr < 0x40000; addr += 0x4000) {
 		if (!memcmp(memory + addr + 8, "Commodore LCD", 13)) {
-			printf("ROM directory entry point @ $%05X\n", addr);
+			DEBUGPRINT("ROM directory entry point @ $%05X" NL, addr);
 			int pos = addr + 13 + 8;
 			while (memory[pos]) {
 				char name[256];
 				memcpy(name, memory + pos + 6, memory[pos] - 6);
 				name[memory[pos] - 6] = 0;
-				printf("\t($%02X $%02X $%02X) START=$%04X : \"%s\"\n",
+				DEBUGPRINT("\t($%02X $%02X $%02X) START=$%04X : \"%s\"" NL,
 					memory[pos + 1], memory[pos + 2], memory[pos + 3],
 					memory[pos + 4] | (memory[pos + 5] <<8),
 					name
 				);
 				//if (defprg && !strcasecmp(name, defprg)) {
-				//	printf("\tFOUND!!!!!\n");
+				//	DEBUGPRINT("\tFOUND!!!!!" NL);
 				//	memory[pos + 1] |= 0x20;
 				//	memory[pos + 1] = 0x20;
 				//} else if (defprg) {
@@ -485,17 +517,25 @@ static void load_program_for_inject ( const char *file_name, int new_address )
 }
 
 
+static void update_addon_title ( void )
+{
+	sprintf(emulator_addon_title, "(%dMHz, %dK RAM)", cpu_mhz, ram_size >> 10);
+}
 
+
+static void set_ram_size ( int kbytes )
+{
+	ram_size = kbytes << 10;
+	DEBUGPRINT("MEM: RAM size is set to %dKbytes." NL, kbytes);
+	update_addon_title();
+}
 
 static void set_cpu_speed ( int mhz )
 {
-	if (mhz < 1)
-		mhz = 1;
-	else if (mhz > 16)
-		mhz = 16;
 	cpu_mhz = mhz;
 	cpu_cycles_per_tv_frame = mhz * 1000000 / 25;
 	DEBUGPRINT("CPU: setting CPU to %dMHz, %d CPU cycles per full 1/25sec frame." NL, mhz, cpu_cycles_per_tv_frame);
+	update_addon_title();
 }
 
 
@@ -527,29 +567,98 @@ static void emulation_loop ( void )
 
 
 
+static void ui_cb_clock_mhz ( const struct menu_st *m, int *query )
+{
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, cpu_mhz == VOIDPTR_TO_INT(m->user_data));
+	if (VOIDPTR_TO_INT(m->user_data) != cpu_mhz)
+		set_cpu_speed(VOIDPTR_TO_INT(m->user_data));
+}
+static void ui_cb_ramsize ( const struct menu_st *m, int *query )
+{
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, (ram_size >> 10) == VOIDPTR_TO_INT(m->user_data));
+	if (VOIDPTR_TO_INT(m->user_data) != (ram_size >> 10) && ARE_YOU_SURE("This will RESET your machine!", i_am_sure_override | ARE_YOU_SURE_DEFAULT_YES)) {
+		set_ram_size(VOIDPTR_TO_INT(m->user_data));
+		cpu65_reset();
+	}
+}
+static const struct menu_st menu_display[] = {
+	{ "Fullscreen",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_windowsize, (void*)0 },
+	{ "Window - 100%",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_windowsize, (void*)1 },
+	{ "Window - 200%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_SEPARATOR,	xemugui_cb_windowsize, (void*)2 },
+        { NULL }
+};
+static const struct menu_st menu_clock[] = {
+	{ "1MHz",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_clock_mhz, (void*)1 },
+	{ "2MHz",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_clock_mhz, (void*)2 },
+	{ "4MHz",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_clock_mhz, (void*)4 },
+	{ NULL }
+};
+static const struct menu_st menu_ramsize[] = {
+	{ " 32K",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_ramsize, (void*)32  },
+	{ " 64K",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_ramsize, (void*)64  },
+	{ " 96K",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_ramsize, (void*)96  },
+	{ "128K",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_ramsize, (void*)128 },
+	{ NULL }
+};
+static const struct menu_st menu_main[] = {
+	{ "Display",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_display },
+	{ "CPU clock speed",		XEMUGUI_MENUID_SUBMENU,		NULL, menu_clock },
+	{ "RAM size",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_ramsize },
+#ifdef XEMU_FILES_SCREENSHOT_SUPPORT
+	{ "Screenshot",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_set_integer_to_one, &register_screenshot_request },
+#endif
+#ifdef XEMU_ARCH_WIN
+	{ "System console",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_sysconsole, NULL },
+#endif
+#ifdef HAVE_XEMU_EXEC_API
+	{ "Browse system folder",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_native_os_prefdir_browser, NULL },
+#endif
+	{ "Reset",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data_if_sure, cpu65_reset },
+	{ "About",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_about_window, NULL },
+#ifdef HAVE_XEMU_EXEC_API
+	{ "Help (on-line)",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_web_help_main, NULL },
+#endif
+	{ "Quit",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_quit_if_sure, NULL },
+	{ NULL }
+};
+
+
+
 
 int main ( int argc, char **argv )
 {
 	xemu_pre_init(APP_ORG, TARGET_NAME, "The world's first Commodore LCD emulator from LGB");
 	xemucfg_define_switch_option("fullscreen", "Start in fullscreen mode");
-	xemucfg_define_num_option("ram", 128, "Sets RAM size in KBytes.");
-	xemucfg_define_num_option("clock", 1, "Sets CPU speed in MHz, integer only, 1-16");
+	xemucfg_define_num_option("ram", 128, "Sets RAM size in KBytes (32-128)");
+	xemucfg_define_num_option("clock", 1, "Sets CPU speed in MHz (integer only), 1-16");
 	xemucfg_define_str_option("rom102", "#clcd-u102.rom", "Selects 'U102' ROM to use");
 	xemucfg_define_str_option("rom103", "#clcd-u103.rom", "Selects 'U103' ROM to use");
 	xemucfg_define_str_option("rom104", "#clcd-u104.rom", "Selects 'U104' ROM to use");
 	xemucfg_define_str_option("rom105", "#clcd-u105.rom", "Selects 'U105' ROM to use");
 	xemucfg_define_str_option("romchr", "#clcd-chargen.rom", "Selects character ROM to use");
+	xemucfg_define_switch_option("keepram", "Deactivate ROM patch for clear RAM and also save/restore RAM");
 	//xemucfg_define_str_option("defprg", NULL, "Selects the ROM-program to set default to");
 	xemucfg_define_str_option("prg", NULL, "Inject BASIC program on entering to BASIC");
 	xemucfg_define_switch_option("syscon", "Keep system console open (Windows-specific effect only)");
+	xemucfg_define_str_option("gui", NULL, "Select GUI type for usage. Specify some insane str to get a list");
+	xemucfg_define_switch_option("besure", "Skip asking \"are you sure?\" on RESET or EXIT");
 	if (xemucfg_parse_all(argc, argv))
 		return 1;
-	set_cpu_speed(xemucfg_get_num("clock"));
-	ram_size = xemucfg_get_num("ram");
-	if (ram_size < 32 || ram_size > 128)
-		FATAL("Bad ram size is defined, must be 32...128");
-	ram_size <<= 10;
+	i_am_sure_override = xemucfg_get_bool("besure");
+	keep_ram = xemucfg_get_bool("keepram");
+	set_cpu_speed(xemucfg_get_ranged_num("clock", 1, 16));
+	set_ram_size(xemucfg_get_ranged_num("ram", 32, 128));
 	DEBUGPRINT("CFG: ram size is %d bytes." NL, ram_size);
+	window_title_info_addon = emulator_addon_title;
 	if (xemu_post_init(
 		TARGET_DESC APP_DESC_APPEND,	// window title
 		1,				// resizable window
@@ -565,6 +674,8 @@ int main ( int argc, char **argv )
 		shutdown_emu		// no emulator specific shutdown function
 	))
 		return 1;
+	osd_init_with_defaults();
+	xemugui_init(xemucfg_get_str("gui"));	// allow to fail (do not exit if it fails). Some targets may not have X running
 	hid_init(
 		lcd_key_map,
 		VIRTUAL_SHIFT_POS,
@@ -582,10 +693,15 @@ int main ( int argc, char **argv )
 		return 1;
 	// Ugly hacks :-( <patching ROM>
 #ifdef ROM_HACK_COLD_START
-	// this ROM patching is needed, as Commodore LCD seems not to work to well with "not intact" SRAM content (ie: it has battery powered SRAM even when "switched off")
-	DEBUG("ROM HACK: cold start condition" NL);
-	memory[0x385BB] = 0xEA;
-	memory[0x385BC] = 0xEA;
+	if (!keep_ram) {
+		// this ROM patching is needed, as Commodore LCD seems not to work to well with "not intact" SRAM content (ie: it has battery powered SRAM even when "switched off")
+		DEBUGPRINT("ROM-HACK: forcing cold start condition with ROM patching!" NL);
+		memory[0x385BB] = 0xEA;
+		memory[0x385BC] = 0xEA;
+	} else {
+		DEBUGPRINT("ROM-HACK: SKIP cold start condition forcing!" NL);
+		xemu_load_file("@memory_saved.bin", memory, ram_size, ram_size, "Cannot load memory content!");
+	}
 #endif
 #ifdef ROM_HACK_NEW_ROM_SEARCHING
 	// this ROM hack modifies the ROM signature searching bytes so we can squeeze extra menu points of the main screen!
@@ -619,6 +735,7 @@ int main ( int argc, char **argv )
 	xemu_timekeeping_start();	// we must call this once, right before the start of the emulation
 	update_rtc();			// this will use time-keeping stuff as well, so initially let's do after the function call above
 	viacyc = 0;
+	// FIXME: add here the "OK to save ROM state" ...
 	XEMU_MAIN_LOOP(emulation_loop, 25, 1);
 	return 0;
 }

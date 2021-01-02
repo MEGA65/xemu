@@ -1,7 +1,7 @@
-## Collection of *simple* emulators of some 8 bits machines using SDL2 library,
-## including the Commodore LCD and Commodore-65 and the MEGA65 too.
+## Collection of emulators of some 8 bits machines using SDL2 library,
+## including the Commodore LCD and Commodore 65 and the MEGA65 too.
 ##
-## Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+## Copyright (C)2016-2021 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -23,6 +23,8 @@ all:
 
 ARCH			= native
 TOPDIR			= ../..
+
+INSTALL_BINDIR		= /usr/local/bin
 
 $(TOPDIR)/build/configure/config-$(ARCH).h $(TOPDIR)/build/configure/config-$(ARCH).make:
 	if [ ! -s $(TOPDIR)/build/configure/config-$(ARCH).h -o ! -s $(TOPDIR)/build/configure/config-$(ARCH).make ]; then bash $(TOPDIR)/build/configure/configure --arch=$(ARCH) ; fi
@@ -57,6 +59,7 @@ OBJS			= $(TARGETOBJS) $(COMMONOBJS)
 ASMOUT			= no
 DEBUG			= no
 RELEASE			= no
+OFFICIALBUILD		= no
 
 CFLAGS_TARGET		= $(CFLAGS_TARGET_$(PRG_TARGET))
 LDFLAGS_TARGET		= $(LDFLAGS_TARGET_$(PRG_TARGET))
@@ -73,6 +76,9 @@ endif
 ifeq ($(RELEASE), yes)
 CFLAGS_OPT		+= $(CONFIG_CFLAGS_OPT_RELEASE) -DXEMU_RELEASE_BUILD
 CONFIG_CFLAGS_LINK	+= $(CONFIG_CFLAGS_OPT_RELEASE)
+endif
+ifeq ($(OFFICIALBUILD), yes)
+CFLAGS_OPT		+= -DXEMU_OFFICIAL_BUILD
 endif
 
 CFLAGS			= $(CONFIG_CFLAGS) $(CFLAGS_OPT) $(CFLAGS_TARGET) -I. -I$(TOPDIR) -include build/configure/config-$(ARCH).h
@@ -110,6 +116,7 @@ xemu-info:
 	@echo "Xemu-framework needed sources: $(SRCS_COMMON)"
 	@echo "Target-specific needed sources: $(SRCS_TARGET)"
 	@echo "Dependecy file created: $(DEPFILE)"
+	@echo "Executable: $(PRG)"
 
 $(TARGETOBJPREFIX)%.o: %.c $(DEPALL)
 ifeq ($(ASMOUT), yes)
@@ -126,7 +133,7 @@ endif
 $(PRG): $(OBJS) $(DEPALL)
 	@echo "const char *XEMU_BUILDINFO_ON  = \"`whoami`@`uname -n` on `uname -s` `uname -r`\";" > $(DEPFILEPREFIX)-buildinfo.c
 	@echo "const char *XEMU_BUILDINFO_AT  = \"`date`\";" >> $(DEPFILEPREFIX)-buildinfo.c
-	@echo "const char *XEMU_BUILDINFO_GIT = \"`git config --get remote.origin.url` `git rev-parse --abbrev-ref HEAD` `git rev-parse HEAD`\";" >> $(DEPFILEPREFIX)-buildinfo.c
+	@echo "const char *XEMU_BUILDINFO_GIT = \"`bash $(TOPDIR)/build/show-git-info`\";" >> $(DEPFILEPREFIX)-buildinfo.c
 	@echo "const char *XEMU_BUILDINFO_TARGET = \"$(PRG_TARGET) ($(PRG)) for $(TARGET) on \" XEMU_ARCH_NAME \" ($(ARCH)) using $(CONFIG_CC)\";" >> $(DEPFILEPREFIX)-buildinfo.c
 	@git log -1 --format=%cd --date=format:%Y%m%d%H%M%S > $(TOPDIR)/build/objs/cdate.data || date '+%Y%m%d%H%M%S' > $(TOPDIR)/build/objs/cdate.data
 	@echo "*** Commit date we're building ($(TOPDIR)/build/objs/cdate.data): `cat $(TOPDIR)/build/objs/cdate.data`"
@@ -138,7 +145,16 @@ run:	$(PRG)
 	cd $(TOPDIR) && XEMU_DEBUG_FILE=debug.log $(PRG_TOP_REL)
 
 strip: $(PRG)
-	$(STRIP) $(PRG)
+	$(CONFIG_STRIP) $(PRG)
+
+install:
+	@echo "Checking if target is UNIX ..."
+	test TARGET_IS_UNIX_$(TARGET_IS_UNIX) = TARGET_IS_UNIX_yes || exit 1
+	$(MAKE) $(PRG)
+	strip $(PRG)
+	mkdir -p $(INSTALL_BINDIR)
+	cp $(PRG) "$(INSTALL_BINDIR)/xemu-`basename $(PRG) .$(ARCH)`"
+	ls -l "$(INSTALL_BINDIR)/xemu-`basename $(PRG) .$(ARCH)`"
 
 dep:
 	rm -f $(DEPFILE)
@@ -151,7 +167,7 @@ $(DEPFILE): $(DEPALL) $(SRCS)
 clean:
 	rm -f $(TOPDIR)/build/objs/?-$(ARCH)-$(TARGET)-* $(PRG)
 
-.PHONY: clean all strip dep do-all run xemu-info config
+.PHONY: clean all strip dep do-all run xemu-info config install
 
 ifneq ($(wildcard $(DEPFILE)),)
 include $(DEPFILE)

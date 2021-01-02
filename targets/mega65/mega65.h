@@ -26,6 +26,9 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 // loading it (however kickstart can overwrite "C65 ROM" anyway, later)
 #define SDCARD_NAME		"@mega65.img"
 
+#define NVRAM_FILE_NAME		"@nvram.bin"
+#define UUID_FILE_NAME		"@uuid.bin"
+
 // Used by updater, etc ... base name only, no path info!
 #define MEGA65_ROM_NAME		"MEGA65.ROM"
 #define MEGA65_ROM_SIZE		0x20000
@@ -41,7 +44,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #define SCREEN_HEIGHT		200
 
 // Default fast clock of M65, in MHz (can be overriden with CLI switch)
-#define MEGA65_DEFAULT_FAST_CLOCK	40
+#define MEGA65_DEFAULT_FAST_CLOCK	40.0
 
 // Needed CPU cycles for a (PAL) scanline for a given mode.
 // For "fast clock", it's calculated, see MEGA65_DEFAULT_FAST_CLOCK
@@ -52,16 +55,15 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #define SID_CYCLES_PER_SEC	1000000
 #define AUDIO_SAMPLE_FREQ	44100
 
-// If defined, a file name string must be used.
-// Then hypervisor memory content will be written into this file on exit.
-#define MEMDUMP_FILE		"dump.mem"
-
 extern void m65mon_show_regs ( void );
 extern void m65mon_dumpmem16 ( Uint16 addr );
 extern void m65mon_dumpmem28 ( int addr );
 extern void m65mon_setmem28  ( int addr, int cnt, Uint8* vals );
 extern void m65mon_set_trace ( int m );
 extern void m65mon_do_trace  ( void );
+#ifdef TRACE_NEXT_SUPPORT
+extern void m65mon_next_command ( void );
+#endif
 extern void m65mon_empty_command ( void );
 extern void m65mon_do_trace_c ( void );
 extern void m65mon_breakpoint ( int brk );
@@ -69,11 +71,14 @@ extern void m65mon_breakpoint ( int brk );
 extern void machine_set_speed ( int verbose );
 
 extern void reset_mega65      ( void );
-extern void reset_mega65_asked( void );
+extern int  reset_mega65_asked( void );
+
+extern int  dump_memory       ( const char *fn );
 
 extern int  refill_c65_rom_from_preinit_cache ( void );
 
 extern int newhack;
 extern unsigned int frames_total_counter;
+extern int register_screenshot_request;
 
 #endif

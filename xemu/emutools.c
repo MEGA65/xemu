@@ -1,4 +1,4 @@
-/* Xemu - Somewhat lame emulation (running on Linux/Unix/Windows/OSX, utilizing
+/* Xemu - emulation (running on Linux/Unix/Windows/OSX, utilizing
    SDL2) of some 8 bit machines, including the Commodore LCD and Commodore 65
    and MEGA65 as well.
    Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
@@ -38,6 +38,11 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 #include "xemu/osd_font_16x16.c"
 
+#ifndef XEMU_NO_SDL_DIALOG_OVERRIDE
+int (*SDL_ShowSimpleMessageBox_custom)(Uint32, const char*, const char*, SDL_Window* ) = SDL_ShowSimpleMessageBox;
+int (*SDL_ShowMessageBox_custom)(const SDL_MessageBoxData*, int* ) = SDL_ShowMessageBox;
+#endif
+
 #ifdef XEMU_ARCH_MAC
 int macos_gui_started = 0;
 #endif
@@ -62,6 +67,7 @@ char *sdl_window_title = (char*)default_window_title;
 char *window_title_custom_addon = NULL;
 char *window_title_info_addon = NULL;
 Uint32 *sdl_pixel_buffer = NULL;
+Uint32 *xemu_frame_pixel_access_p = NULL;
 int texture_x_size_in_bytes;
 int emu_is_fullscreen = 0;
 static int win_xsize, win_ysize;
@@ -75,6 +81,8 @@ static char *window_title_buffer, *window_title_buffer_end;
 static struct timeval unix_time_tv;
 static Uint64 et_old;
 static int td_balancer, td_em_ALL, td_pc_ALL;
+static Uint64 td_stat_counter = 0, td_stat_sum = 0;
+static int td_stat_min = INT_MAX, td_stat_max = INT_MIN;
 int sysconsole_is_open = 0;
 FILE *debug_fp = NULL;
 int chatty_xemu = 1;
@@ -86,16 +94,18 @@ int osd_status = 0;
 static Uint32 osd_colours[16], *osd_pixels = NULL, osd_colour_fg, osd_colour_bg;
 static SDL_Texture *sdl_osdtex = NULL;
 static SDL_bool grabbed_mouse = SDL_FALSE, grabbed_mouse_saved = SDL_FALSE;
-
+int allow_mouse_grab = 1;
 
 #if !SDL_VERSION_ATLEAST(2, 0, 4)
 #error "At least SDL version 2.0.4 is needed!"
 #endif
 
 
-int set_mouse_grab ( SDL_bool state )
+int set_mouse_grab ( SDL_bool state, int force_allow )
 {
-	if (state != grabbed_mouse) {
+	if (state && (!allow_mouse_grab || force_allow))
+		return 0;
+	else if (state != grabbed_mouse) {
 		grabbed_mouse = state;
 		SDL_SetRelativeMouseMode(state);
 		SDL_SetWindowGrab(sdl_win, state);
@@ -114,13 +124,13 @@ SDL_bool is_mouse_grab ( void )
 void save_mouse_grab ( void )
 {
 	grabbed_mouse_saved = grabbed_mouse;
-	set_mouse_grab(SDL_FALSE);
+	set_mouse_grab(SDL_FALSE, 1);
 }
 
 
 void restore_mouse_grab ( void )
 {
-	set_mouse_grab(grabbed_mouse_saved);
+	set_mouse_grab(grabbed_mouse_saved, 1);
 }
 
 
@@ -171,10 +181,25 @@ unsigned int xemu_get_microseconds ( void )
 }
 
 
+Uint8 xemu_hour_to_bcd12h ( Uint8 hours, int hour_offset )
+{
+	// hour offset is only an ugly hack to shift hour for testing! The value can be negative too, and over/under-flow of the 0-23 hours range
+	hours = abs((int)hours + hour_offset) % 24;
+	if (hours == 0)
+		return 0x12;                                // 00:mm -> 12:mmAM for HH = 0      (0x12 is BCD representation of 12)
+	else if (hours < 12)
+		return XEMU_BYTE_TO_BCD(hours);             // HH:mm -> HH:mmAM for 0 < HH < 12
+	else if (hours == 12)
+		return 0x12 + 0x80;                         // 12:mm -> 12:mmPM for HH = 12     (0x80 is PM flag, 0x12 is BCD representation of 12)
+	else
+		return XEMU_BYTE_TO_BCD(hours - 12) + 0x80; // HH:mm -> HH:mmPM for HH > 12     (0x80 is PM flag)
+}
+
+
 void *xemu_malloc ( size_t size )
 {
 	void *p = malloc(size);
-	if (!p)
+	if (XEMU_UNLIKELY(!p))
 		FATAL("Cannot allocate %d bytes of memory.", (int)size);
 	return p;
 }
@@ -183,7 +208,7 @@ void *xemu_malloc ( size_t size )
 void *xemu_realloc ( void *p, size_t size )
 {
 	p = realloc(p, size);
-	if (!p)
+	if (XEMU_UNLIKELY(!p))
 		FATAL("Cannot re-allocate %d bytes of memory.", (int)size);
 	return p;
 }
@@ -208,7 +233,7 @@ void *xemu_malloc_ALIGNED ( size_t size )
 char *xemu_strdup ( const char *s )
 {
 	char *p = strdup(s);
-	if (!p)
+	if (XEMU_UNLIKELY(!p))
 		FATAL("Cannot allocate memory for strdup()");
 	return p;
 }
@@ -346,7 +371,7 @@ void xemu_timekeeping_delay ( int td_em )
 	td = get_elapsed_time(et_new, &et_old, &unix_time_tv);
 	seconds_timer_trigger = (unix_time_tv.tv_sec != old_unix_time);
 	if (seconds_timer_trigger) {
-		snprintf(window_title_buffer_end, 32, "  [%d%% %d%%] %s %s",
+		snprintf(window_title_buffer_end, 64, "  [%d%% %d%%] %s %s",
 			((td_em_ALL < td_pc_ALL) && td_pc_ALL) ? td_em_ALL * 100 / td_pc_ALL : 100,
 			td_em_ALL ? (td_pc_ALL * 100 / td_em_ALL) : -1,
 			window_title_custom_addon ? window_title_custom_addon : "running",
@@ -359,7 +384,19 @@ void xemu_timekeeping_delay ( int td_em )
 		td_pc_ALL += td_pc;
 		td_em_ALL += td_em;
 	}
-	if (td < 0) return; // invalid, sleep was about for _minus_ time? eh, give me that time machine, dude! :)
+	// Some statistics
+	if (td_em_ALL > 0 && td_pc_ALL > 0) {
+		int stat = td_pc_ALL * 100 / td_em_ALL;
+		td_stat_counter++;
+		td_stat_sum += stat;
+		if (stat > td_stat_max)
+			td_stat_max = stat;
+		if (stat < td_stat_min && stat)
+			td_stat_min = stat;
+	}
+	// Check: invalid, sleep was about for _minus_ time? eh, give me that time machine, dude! :)
+	if (td < 0)
+		return;
 	// Balancing real and wanted sleep time on long run
 	// Insane big values are forgotten, maybe emulator was stopped, or something like that
 	td_balancer -= td;
@@ -384,18 +421,29 @@ static void shutdown_emulator ( void )
 	DEBUG("XEMU: Shutdown callback function has been called." NL);
 	if (shutdown_user_function)
 		shutdown_user_function();
-	if (sdl_win)
+	if (sdl_win) {
 		SDL_DestroyWindow(sdl_win);
+		sdl_win = NULL;
+	}
 	atexit_callback_for_console();
 #ifdef HAVE_XEMU_SOCKET_API
 	xemusock_uninit();
 #endif
-	SDL_Quit();
+	//SDL_Quit();
+	if (td_stat_counter) {
+		DEBUGPRINT(NL "TIMING: Xemu CPU usage: avg=%.2f%%, min=%d%%, max=%d%% (%u counts)" NL,
+			td_stat_sum / (double)td_stat_counter, td_stat_min == INT_MAX ? 0 : td_stat_min, td_stat_max,
+			(unsigned int)td_stat_counter
+		);
+	}
+	DEBUGPRINT("XEMU: good by(T)e." NL);
 	if (debug_fp) {
 		fclose(debug_fp);
 		debug_fp = NULL;
 	}
-	DEBUGPRINT(NL "XEMU: good by(T)e." NL);
+	// It seems, calling SQL_Quit() at least on Windows causes "segfault".
+	// Not sure why, but to be safe, I just skip calling it :(
+	//SDL_Quit();
 }
 
 
@@ -447,6 +495,14 @@ static char *GetHackedPrefDir ( const char *base_path, const char *name )
 void xemu_pre_init ( const char *app_organization, const char *app_name, const char *slogan )
 {
 #ifdef XEMU_ARCH_UNIX
+#ifndef XEMU_DO_NOT_DISALLOW_ROOT
+	// Some check to disallow dangerous things (running Xemu as user/group root)
+	if (getuid() == 0 || geteuid() == 0)
+		FATAL("Xemu must not be run as user root");
+	if (getgid() == 0 || getegid() == 0)
+		FATAL("Xemu must not be run as group root");
+#endif
+	// ignore SIGHUP, eg closing the terminal Xemu was started from ...
 	signal(SIGHUP, SIG_IGN);	// ignore SIGHUP, eg closing the terminal Xemu was started from ...
 #endif
 #ifdef XEMU_ARCH_HTML
@@ -532,6 +588,15 @@ int xemu_init_sdl ( void )
 			SDL_Has3DNow(),SDL_HasAVX(),SDL_HasAVX2(),SDL_HasAltiVec(),SDL_HasMMX(),SDL_HasRDTSC(),SDL_HasSSE(),SDL_HasSSE2(),SDL_HasSSE3(),SDL_HasSSE41(),SDL_HasSSE42(),
 			SDL_GetCurrentVideoDriver(), SDL_GetCurrentAudioDriver()
 		);
+#if defined(XEMU_ARCH_WIN)
+#	define SDL_VER_MISMATCH_WARN_STR "Xemu was not compiled with the linked DLL for SDL.\nPlease upgrade your DLL too, not just Xemu binary."
+#elif defined(XEMU_ARCH_OSX)
+#	define SDL_VER_MISMATCH_WARN_STR "Xemu was not compuled with the linked dylib for SDL.\nPlease upgrade your dylib too, not just Xemu binary."
+#endif
+#ifdef SDL_VER_MISMATCH_WARN_STR
+	if (sdlver_compiled.major != sdlver_linked.major || sdlver_compiled.minor != sdlver_linked.minor || sdlver_compiled.patch != sdlver_linked.patch)
+		WARNING_WINDOW(SDL_VER_MISMATCH_WARN_STR);
+#endif
 	return 0;
 }
 
@@ -569,7 +634,7 @@ int xemu_post_init (
 	if (xemu_init_sdl())	// it is possible that is has been already called, but it's not a problem
 		return 1;
 	shutdown_user_function = shutdown_callback;
-	DEBUGPRINT("Timing: sleep = %s, query = %s" NL, __SLEEP_METHOD_DESC, __TIMING_METHOD_DESC);
+	DEBUGPRINT("TIMING: sleep = %s, query = %s" NL, __SLEEP_METHOD_DESC, __TIMING_METHOD_DESC);
 	DEBUGPRINT("SDL preferences directory: %s" NL, sdl_pref_dir);
 	DEBUG("SDL install directory: %s" NL, sdl_inst_dir);
 	DEBUG("SDL base directory: %s" NL, sdl_base_dir);
@@ -659,8 +724,9 @@ int xemu_post_init (
 	SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");			// 1 = do minimize the SDL_Window if it loses key focus when in fullscreen mode
 	SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");				// 1 = enable screen saver
 	/* texture access / buffer */
-	if (!locked_texture_update)
+	if (!locked_texture_update) {
 		sdl_pixel_buffer = xemu_malloc_ALIGNED(texture_x_size_in_bytes * texture_y_size);
+	}
 	// play a single frame game, to set a consistent colour (all black ...) for the emulator. Also, it reveals possible errors with rendering
 	xemu_render_dummy_frame(black_colour, texture_x_size, texture_y_size);
 	if (chatty_xemu)
@@ -741,9 +807,8 @@ void xemu_render_dummy_frame ( Uint32 colour, int texture_x_size, int texture_y_
 {
 	int tail;
 	Uint32 *pp = xemu_start_pixel_buffer_access(&tail);
-	int x, y;
-	for (y = 0; y < texture_y_size; y++) {
-		for (x = 0; x < texture_x_size; x++)
+	for (int y = 0; y < texture_y_size; y++) {
+		for (int x = 0; x < texture_x_size; x++)
 			*(pp++) = colour;
 		pp += tail;
 	}
@@ -764,6 +829,7 @@ Uint32 *xemu_start_pixel_buffer_access ( int *texture_tail )
 {
 	if (sdl_pixel_buffer) {
 		*texture_tail = 0;		// using non-locked texture access, "tail" is always zero
+		xemu_frame_pixel_access_p = sdl_pixel_buffer;
 		return sdl_pixel_buffer;	// using non-locked texture access, return with the malloc'ed buffer
 	} else {
 		int pitch;
@@ -776,6 +842,7 @@ Uint32 *xemu_start_pixel_buffer_access ( int *texture_tail )
 		if (pitch < 0)
 			FATAL("Negative pitch value got for the texture size!");
 		*texture_tail = (pitch >> 2);
+		xemu_frame_pixel_access_p = pixels;
 		return pixels;
 	}
 }
@@ -787,10 +854,12 @@ Uint32 *xemu_start_pixel_buffer_access ( int *texture_tail )
    texture method! */
 void xemu_update_screen ( void )
 {
-	if (sdl_pixel_buffer)
+	if (sdl_pixel_buffer) {
 		SDL_UpdateTexture(sdl_tex, NULL, sdl_pixel_buffer, texture_x_size_in_bytes);
-	else
+	} else {
 		SDL_UnlockTexture(sdl_tex);
+		xemu_frame_pixel_access_p = NULL;	// not valid anymore!
+	}
 	//if (seconds_timer_trigger)
 		SDL_RenderClear(sdl_ren); // Note: it's not needed at any price, however eg with full screen or ratio mismatches, unused screen space will be corrupted without this!
 	SDL_RenderCopy(sdl_ren, sdl_tex, NULL, NULL);
@@ -834,7 +903,6 @@ void osd_update ()
 
 int osd_init ( int xsize, int ysize, const Uint8 *palette, int palette_entries, int fade_dec, int fade_end )
 {
-	int a;
 	// start with disabled state, so we can abort our init process without need to disable this
 	osd_status = 0;
 	osd_enabled = 0;
@@ -862,7 +930,7 @@ int osd_init ( int xsize, int ysize, const Uint8 *palette, int palette_entries, 
 	osd_ysize = ysize;
 	osd_fade_dec = fade_dec;
 	osd_fade_end = fade_end;
-	for (a = 0; a < palette_entries; a++)
+	for (int a = 0; a < palette_entries; a++)
 		osd_colours[a] = SDL_MapRGBA(sdl_pix_fmt, palette[a << 2], palette[(a << 2) + 1], palette[(a << 2) + 2], palette[(a << 2) + 3]);
 	osd_enabled = 1;	// great, everything is OK, we can set enabled state!
 	osd_available = 1;
@@ -878,8 +946,8 @@ int osd_init ( int xsize, int ysize, const Uint8 *palette, int palette_entries, 
 int osd_init_with_defaults ( void )
 {
 	const Uint8 palette[] = {
-		0, 0, 0, 0x80,		// black with alpha channel 0x80
-		0xFF,0xFF,0xFF,0xFF	// white
+		0xC0, 0x40, 0x40, 0xFF,
+		0xFF, 0xFF, 0x00, 0xFF
 	};
 	return osd_init(
 		OSD_TEXTURE_X_SIZE, OSD_TEXTURE_Y_SIZE,
@@ -1000,13 +1068,17 @@ int _sdl_emu_secured_modal_box_ ( const char *items_in, const char *msg )
 	int buttonid;
 	SDL_MessageBoxButtonData buttons[16];
 	SDL_MessageBoxData messageboxdata = {
-		SDL_MESSAGEBOX_WARNING, /* .flags */
-		sdl_win, /* .window */
-		default_window_title, /* .title */
-		msg, /* .message */
-		0,      /* number of buttons, will be updated! */
+		SDL_MESSAGEBOX_WARNING	// .flags
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+		| SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT
+#endif
+		,
+		sdl_win,		// .window
+		default_window_title,	// .title
+		msg,			// .message
+		0,			// number of buttons, will be updated!
 		buttons,
-		NULL    // &colorScheme
+		NULL			// &colorScheme
 	};
 	if (!SDL_WasInit(0))
 		FATAL("Calling _sdl_emu_secured_modal_box_() without non-zero SDL_Init() before!");
@@ -1045,9 +1117,9 @@ int _sdl_emu_secured_modal_box_ ( const char *items_in, const char *msg )
 		items = p + 1;
 	}
 	save_mouse_grab();
-	SDL_ShowMessageBox(&messageboxdata, &buttonid);
-	clear_emu_events();
+	SDL_ShowMessageBox_custom(&messageboxdata, &buttonid);
 	xemu_drop_events();
+	clear_emu_events();
 	SDL_RaiseWindow(sdl_win);
 	restore_mouse_grab();
 	xemu_timekeeping_start();
@@ -1151,8 +1223,8 @@ static CHAR sysconsole_getch( void )
 	if (!h)	// console cannot be accessed or WTF?
 		return 0;
 	DWORD cc, mode_saved;
-	GetConsoleMode (h, &mode_saved);
-	SetConsoleMode (h, mode_saved & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT));
+	GetConsoleMode(h, &mode_saved);
+	SetConsoleMode(h, mode_saved & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT));
 	TCHAR c = 0;
 	ReadConsole(h, &c, 1, &cc, NULL);
 	SetConsoleMode(h, mode_saved);

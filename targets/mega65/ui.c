@@ -26,12 +26,13 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #include "sdcard.h"
 #include "sdcontent.h"
 #include "xemu/emutools_hid.h"
+#include "xemu/c64_kbd_mapping.h"
 #include "inject.h"
+#include "input_devices.h"
+#include "uart_monitor.h"
+#include "xemu/f011_core.h"
+#include "vic4.h"
 
-#define		HELP_URL	"https://github.com/lgblgblgb/xemu/wiki/MEGA65-help"
-
-
-//#if defined(CONFIG_DROPFILE_CALLBACK) || defined(XEMU_GUI)
 
 static int attach_d81 ( const char *fn )
 {
@@ -68,8 +69,10 @@ void emu_dropfile_callback ( const char *fn )
 #endif
 
 
-static void ui_attach_d81_by_browsing ( void )
+static void ui_attach_d81 ( const struct menu_st *m, int *query )
 {
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, 0);
+	//ui_attach_d81_by_browsing();
 	char fnbuf[PATH_MAX + 1];
 	static char dir[PATH_MAX + 1] = "";
 	if (!xemugui_file_selector(
@@ -81,7 +84,14 @@ static void ui_attach_d81_by_browsing ( void )
 	))
 		attach_d81(fnbuf);
 	else
-		DEBUGPRINT("UI: file selection for D81 mount was cancalled." NL);
+		DEBUGPRINT("UI: file selection for D81 mount was cancelled." NL);
+}
+
+
+static void ui_detach_d81 ( const struct menu_st *m, int *query )
+{
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, 0);
+	forget_external_d81();
 }
 
 
@@ -91,7 +101,7 @@ static void ui_run_prg_by_browsing ( void )
 	static char dir[PATH_MAX + 1] = "";
 	if (!xemugui_file_selector(
 		XEMUGUI_FSEL_OPEN | XEMUGUI_FSEL_FLAG_STORE_DIR,
-		"Select PRG to directly load&run",
+		"Select PRG to directly load and run",
 		dir,
 		fnbuf,
 		sizeof fnbuf
@@ -99,24 +109,8 @@ static void ui_run_prg_by_browsing ( void )
 		reset_mega65();
 		inject_register_prg(fnbuf, 0);
 	} else
-		DEBUGPRINT("UI: file selection for D81 mount was cancalled." NL);
+		DEBUGPRINT("UI: file selection for PRG injection was cancelled." NL);
 }
-
-
-static void ui_native_os_file_browser ( void )
-{
-	xemuexec_open_native_file_browser(sdl_pref_dir);
-}
-
-
-static void ui_online_help ( void )
-{
-	if (ARE_YOU_SURE("Shall I open a web browser instance with the help for you?", 0))
-		xemuexec_open_native_file_browser(HELP_URL);
-	else
-		INFO_WINDOW("Help request was cancelled by you");
-}
-
 
 #ifdef BASIC_TEXT_SUPPORT
 #include "xemu/basic_text.h"
@@ -154,12 +148,12 @@ static void ui_format_sdcard ( void )
 	if (ARE_YOU_SURE(
 		"Formatting your SD-card image file will cause ALL your data,\n"
 		"system files (etc!) to be lost, forever!\n"
-		"Are you sure to continue this self-desctruction sequence? :)"
+		"Are you sure to continue this self-destruction sequence? :)"
 		,
 		0
 	)) {
 		if (!sdcontent_handle(sdcard_get_size(), NULL, SDCONTENT_FORCE_FDISK))
-			INFO_WINDOW("You SD-card file has been partitioned/formatted\nMEGA65 emulation is about to RESET now!");
+			INFO_WINDOW("Your SD-card file has been partitioned/formatted\nMEGA65 emulation is about to RESET now!");
 	}
 	reset_mega65();
 }
@@ -228,18 +222,92 @@ static void ui_update_sdcard ( void )
 	reset_mega65();
 }
 
-static void osd_key_debugger ( void )
+
+static void reset_into_utility_menu ( void )
 {
-	hid_show_osd_keys = !hid_show_osd_keys;
-	OSD(-1, -1, "OSD key debugger turned %s", hid_show_osd_keys ? "ON" : "OFF");    
+	if (reset_mega65_asked()) {
+		hwa_kbd_fake_key(0x20);
+		KBD_RELEASE_KEY(0x75);
+	}
 }
+
+static void reset_into_c64_mode ( void )
+{
+	if (reset_mega65_asked()) {
+		// we need this, because autoboot disk image would bypass the "go to C64 mode" on 'Commodore key' feature
+		// this call will deny disk access, and re-enable on the READY. state.
+		inject_register_allow_disk_access();
+		hid_set_autoreleased_key(0x75);
+		KBD_PRESS_KEY(0x75);	// "MEGA" key is pressed for C64 mode
+	}
+
+}
+
+static void reset_into_c65_mode ( void )
+{
+	if (reset_mega65_asked()) {
+		KBD_RELEASE_KEY(0x75);
+		hwa_kbd_fake_key(0);
+	}
+}
+
+static void reset_into_c65_mode_noboot ( void )
+{
+	if (reset_mega65_asked()) {
+		inject_register_allow_disk_access();
+		KBD_RELEASE_KEY(0x75);
+		hwa_kbd_fake_key(0);
+	}
+}
+
+#ifdef HAS_UARTMON_SUPPORT
+static void ui_start_umon ( const struct menu_st *m, int *query )
+{
+	int is_active = uartmon_is_active();
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, is_active);
+	if (is_active) {
+		INFO_WINDOW("UART monitor is already active.\nCurrently stopping it is not supported.");
+		return;
+	}
+	if (!uartmon_init(UMON_DEFAULT_PORT))
+		INFO_WINDOW("UART monitor has been starton on " UMON_DEFAULT_PORT);
+}
+#endif
+
+static void ui_dump_memory ( void )
+{
+	char fnbuf[PATH_MAX + 1];
+	static char dir[PATH_MAX + 1] = "";
+	if (!xemugui_file_selector(
+		XEMUGUI_FSEL_SAVE | XEMUGUI_FSEL_FLAG_STORE_DIR,
+		"Dump memory content into file",
+		dir,
+		fnbuf,
+		sizeof fnbuf
+	)) {
+		dump_memory(fnbuf);
+	}
+}
+
+static void ui_cb_show_drive_led ( const struct menu_st *m, int *query )
+{
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, show_drive_led);
+	show_drive_led = !show_drive_led;
+}
+
+
+/**** MENU SYSTEM ****/
 
 
 static const struct menu_st menu_display[] = {
 	{ "Fullscreen",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_windowsize, (void*)0 },
 	{ "Window - 100%",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_windowsize, (void*)1 },
-	{ "Window - 200%",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_windowsize, (void*)2 },
-	{ "OSD key debugger",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, osd_key_debugger },
+	{ "Window - 200%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_SEPARATOR,	xemugui_cb_windowsize, (void*)2 },
+	{ "Enable mouse grab + emu",	XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_set_mouse_grab, NULL },
+	{ "Show drive LED",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_show_drive_led, NULL },
 	{ NULL }
 };
 static const struct menu_st menu_sdcard[] = {
@@ -247,22 +315,66 @@ static const struct menu_st menu_sdcard[] = {
 	{ "Update files on SD image",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_update_sdcard },
 	{ NULL }
 };
+static const struct menu_st menu_reset[] = {
+	{ "Reset M65",  		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, reset_into_c65_mode        },
+	{ "Reset M65 without autoboot",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, reset_into_c65_mode_noboot },
+	{ "Reset into utility menu",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, reset_into_utility_menu    },
+	{ "Reset into C64 mode",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, reset_into_c64_mode        },
+	{ NULL }
+};
+static const struct menu_st menu_debug[] = {
+#ifdef HAS_UARTMON_SUPPORT
+	{ "Start umon on " UMON_DEFAULT_PORT,
+					XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_start_umon, NULL },
+#endif
+	{ "OSD key debugger",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_osd_key_debugger, NULL },
+	{ "Dump memory info file",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_dump_memory },
+	{ NULL }
+};
+#ifdef HAVE_XEMU_EXEC_API
+static const struct menu_st menu_help[] = {
+	{ "Xemu MEGA65 help page",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_web_help_main, "help" },
+	{ "Check update / useful MEGA65 links",
+					XEMUGUI_MENUID_CALLABLE,	xemugui_cb_web_help_main, "versioncheck" },
+	{ "Xemu download page",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_web_help_main, "downloadpage" },
+	{ "Download MEGA65 book",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_web_help_main, "downloadmega65book" },
+	{ NULL }
+};
+#endif
+static const struct menu_st menu_d81[] = {
+	{ "Attach user D81",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_attach_d81, NULL },
+	{ "Use internal D81",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_detach_d81, NULL },
+	{ NULL }
+};
 static const struct menu_st menu_main[] = {
-	{ "Display",			XEMUGUI_MENUID_SUBMENU,		menu_display, NULL },
-	{ "SD-card",			XEMUGUI_MENUID_SUBMENU,		menu_sdcard, NULL },
-	{ "Reset M65",  		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, reset_mega65_asked },
-	{ "Attach D81",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_attach_d81_by_browsing },
+	{ "Display",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_display },
+	{ "SD-card",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_sdcard  },
+	{ "FD D81",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_d81     },
+	{ "Reset",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_reset   },
+	{ "Debug",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_debug   },
 	{ "Run PRG directly",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_run_prg_by_browsing },
 #ifdef BASIC_TEXT_SUPPORT
 	{ "Save BASIC as text",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_save_basic_as_text },
 #endif
-	{ "Browse system folder",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_native_os_file_browser },
-#ifdef XEMU_ARCH_WIN
-	{ "System console", XEMUGUI_MENUID_CALLABLE | XEMUGUI_MENUFLAG_QUERYBACK, xemugui_cb_sysconsole, NULL },
+#ifdef XEMU_FILES_SCREENSHOT_SUPPORT
+	{ "Screenshot",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_set_integer_to_one, &register_screenshot_request },
 #endif
-	{ "Help (online)", XEMUGUI_MENUID_CALLABLE, xemugui_cb_call_user_data, ui_online_help },
-	{ "About", XEMUGUI_MENUID_CALLABLE, xemugui_cb_about_window, NULL },
-	{ "Quit", XEMUGUI_MENUID_CALLABLE, xemugui_cb_call_quit_if_sure, NULL },
+#ifdef XEMU_ARCH_WIN
+	{ "System console",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_sysconsole, NULL },
+#endif
+#ifdef HAVE_XEMU_EXEC_API
+	{ "Help (online)",		XEMUGUI_MENUID_SUBMENU,		NULL, menu_help },
+#endif
+	{ "About",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_about_window, NULL },
+#ifdef HAVE_XEMU_EXEC_API
+	{ "Browse system folder",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_native_os_prefdir_browser, NULL },
+#endif
+	{ "Quit",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_quit_if_sure, NULL },
 	{ NULL }
 };
 

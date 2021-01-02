@@ -47,21 +47,32 @@ static int nmi_level;			// please read the comment at nmi_set() below
 int newhack = 0;
 unsigned int frames_total_counter = 0;
 
-static int fast_mhz, cpu_cycles_per_scanline_for_fast_mode, speed_current;
-static char fast_mhz_in_string[8];
+static int  cpu_cycles_per_scanline_for_fast_mode, speed_current;
+static char fast_mhz_in_string[16];
 static int frame_counter;
 static int   paused = 0, paused_old = 0;
 static int   breakpoint_pc = -1;
+#ifdef TRACE_NEXT_SUPPORT
+static int   orig_sp = 0;
+static int   trace_next_trigger = 0;
+#endif
 static int   trace_step_trigger = 0;
 #ifdef HAS_UARTMON_SUPPORT
 static void (*m65mon_callback)(void) = NULL;
 #endif
 static const char emulator_paused_title[] = "TRACE/PAUSE";
-static char emulator_speed_title[] = "????MHz";
+static char emulator_speed_title[64] = "?MHz";
 static int cpu_cycles_per_step = 100; 	// some init value, will be overriden, but it must be greater initially than "only a few" anyway
 
 static int force_external_rom = 0;
 static int force_upload_fonts = 0;
+
+static Uint8 nvram_original[sizeof nvram];
+static int uuid_must_be_saved = 0;
+
+static int rtc_hour_offset = 0;
+int register_screenshot_request = 0;
+
 
 
 void cpu65_illegal_opcode_callback ( void )
@@ -316,6 +327,24 @@ static void mega65_init ( void )
 		hypervisor_debug_invalidate("no kickup is loaded, built-in one does not have debug info");
 	// *** Initializes memory subsystem of MEGA65 emulation itself
 	memory_init();
+	// Load contents of NVRAM.
+	// Also store as "nvram_original" so we can sense on shutdown of the emu, if we need to up-date the on-disk version
+	// If we fail to load it (does not exist?) it will be written out anyway on exit.
+	if (xemu_load_file(NVRAM_FILE_NAME, nvram, sizeof nvram, sizeof nvram, "Cannot load NVRAM state. Maybe first run of Xemu?\nOn next Xemu run, it should have been corrected though automatically!\nSo no need to worry.") == sizeof nvram) {
+		memcpy(nvram_original, nvram, sizeof nvram);
+	} else {
+		// could not load from disk. Initialize to soma values.
+		// Alsa, set nvram and nvram_original being different, so exit handler will sense the situation and save it.
+		memset(nvram, 0, sizeof nvram);
+		memset(nvram_original, 0xAA, sizeof nvram);
+	}
+	// We generate (if does not exist) an UUID for ourself. It can be read back via the 'UUID' registers.
+	if (xemu_load_file(UUID_FILE_NAME, mega65_uuid, sizeof mega65_uuid, sizeof mega65_uuid, NULL) != sizeof mega65_uuid) {
+		for (int a = 0; a < sizeof mega65_uuid; a++) {
+			mega65_uuid[a] = rand();
+		}
+		uuid_must_be_saved = 1;
+	}
 	// fill the actual M65 memory areas with values managed by load_memory_preinit_cache() calls
 	// This is a separated step, to be able to call refill_memory_from_preinit_cache() later as well, in case of a "deep reset" functionality is needed for Xemu (not just CPU/hw reset),
 	// without restarting Xemu for that purpose.
@@ -353,14 +382,14 @@ static void mega65_init ( void )
 #ifdef HAS_UARTMON_SUPPORT
 	uartmon_init(xemucfg_get_str("uartmon"));
 #endif
-	fast_mhz = xemucfg_get_num("fastclock");
+	double fast_mhz = xemucfg_get_float("fastclock");
 	if (fast_mhz < 3 || fast_mhz > 200) {
-		ERROR_WINDOW("Fast clock given by -fastclock switch must be between 3...200MHz. Bad value, defaulting to %dMHz", MEGA65_DEFAULT_FAST_CLOCK);
+		ERROR_WINDOW("Fast clock given by -fastclock switch must be between 3...200MHz. Bad value, defaulting to %.2fMHz", MEGA65_DEFAULT_FAST_CLOCK);
 		fast_mhz = MEGA65_DEFAULT_FAST_CLOCK;
 	}
-	sprintf(fast_mhz_in_string, "%dMHz", fast_mhz);
+	sprintf(fast_mhz_in_string, "%.2fMHz", fast_mhz);
 	cpu_cycles_per_scanline_for_fast_mode = 64 * fast_mhz;
-	DEBUGPRINT("SPEED: fast clock is set to %dMHz, %d CPU cycles per scanline." NL, fast_mhz, cpu_cycles_per_scanline_for_fast_mode);
+	DEBUGPRINT("SPEED: fast clock is set to %.2fMHz, %d CPU cycles per scanline." NL, fast_mhz, cpu_cycles_per_scanline_for_fast_mode);
 	cpu65_reset(); // reset CPU (though it fetches its reset vector, we don't use that on M65, but the KS hypervisor trap)
 	rom_protect = 0;
 	hypervisor_start_machine();
@@ -380,29 +409,36 @@ static void mega65_init ( void )
 }
 
 
-#include <unistd.h>
-
-
+int dump_memory ( const char *fn )
+{
+	if (fn && *fn) {
+		DEBUGPRINT("MEM: Dumping memory into file: %s" NL, fn);
+		return xemu_save_file(fn, main_ram, (128 + 256) * 1024, "Cannot dump memory into file");
+	} else {
+		return 0;
+	}
+}
 
 
 static void shutdown_callback ( void )
 {
-	int a;
+	// Write out NVRAM if changed!
+	if (memcmp(nvram, nvram_original, sizeof(nvram))) {
+		DEBUGPRINT("NVRAM: changed, writing out on exit." NL);
+		xemu_save_file(NVRAM_FILE_NAME, nvram, sizeof nvram, "Cannot save changed NVRAM state! NVRAM changes will be lost!");
+	}
+	if (uuid_must_be_saved) {
+		uuid_must_be_saved = 0;
+		DEBUGPRINT("UUID: must be saved." NL);
+		xemu_save_file(UUID_FILE_NAME, mega65_uuid, sizeof mega65_uuid, NULL);
+	}
 	eth65_shutdown();
-	for (a = 0; a < 0x40; a++)
+	for (int a = 0; a < 0x40; a++)
 		DEBUG("VIC-3 register $%02X is %02X" NL, a, vic_registers[a]);
 	cia_dump_state (&cia1);
 	cia_dump_state (&cia2);
-#if defined(MEMDUMP_FILE) && !defined(__EMSCRIPTEN__)
-	// Dump hypervisor memory to a file, so you can check it after exit.
-	FILE *f = fopen(MEMDUMP_FILE, "wb");
-	if (f) {
-		fwrite(main_ram,		1, 0x20000 - 2048, f);
-		fwrite(colour_ram,		1, 2048, f);
-		fwrite(main_ram + 0x20000,	1, 0x40000, f);
-		fclose(f);
-		DEBUGPRINT("Memory state is dumped into %s" DIRSEP_STR "%s" NL, getcwd(NULL, PATH_MAX), MEMDUMP_FILE);
-	}
+#if !defined(XEMU_ARCH_HTML)
+	(void)dump_memory(xemucfg_get_str("dumpmem"));
 #endif
 #ifdef HAS_UARTMON_SUPPORT
 	uartmon_close();
@@ -433,11 +469,15 @@ void reset_mega65 ( void )
 }
 
 
-void reset_mega65_asked ( void )
+int reset_mega65_asked ( void )
 {
-	if (ARE_YOU_SURE("Are you sure to HARD RESET your emulated machine?", i_am_sure_override | ARE_YOU_SURE_DEFAULT_YES))
+	if (ARE_YOU_SURE("Are you sure to HARD RESET your emulated machine?", i_am_sure_override | ARE_YOU_SURE_DEFAULT_YES)) {
 		reset_mega65();
+		return 1;
+	} else
+		return 0;
 }
+
 
 static void update_emulator ( void )
 {
@@ -458,8 +498,16 @@ static void update_emulator ( void )
 //	if (seconds_timer_trigger) {
 	const struct tm *t = xemu_get_localtime();
 	const Uint8 sec10ths = xemu_get_microseconds() / 100000;
-	cia_ugly_tod_updater(&cia1, t, sec10ths);
-	cia_ugly_tod_updater(&cia2, t, sec10ths);
+	// UPDATE CIA TODs:
+	cia_ugly_tod_updater(&cia1, t, sec10ths, rtc_hour_offset);
+	cia_ugly_tod_updater(&cia2, t, sec10ths, rtc_hour_offset);
+	// UPDATE the RTC too:
+	rtc_regs[0] = XEMU_BYTE_TO_BCD(t->tm_sec);	// seconds
+	rtc_regs[1] = XEMU_BYTE_TO_BCD(t->tm_min);	// minutes
+	rtc_regs[2] = xemu_hour_to_bcd12h(t->tm_hour, rtc_hour_offset);	// hours
+	rtc_regs[3] = XEMU_BYTE_TO_BCD(t->tm_mday);	// day of mounth
+	rtc_regs[4] = XEMU_BYTE_TO_BCD(t->tm_mon) + 1;	// month
+	rtc_regs[5] = XEMU_BYTE_TO_BCD(t->tm_year - 100);	// year
 //	}
 }
 
@@ -490,18 +538,18 @@ void m65mon_show_regs ( void )
 void m65mon_dumpmem16 ( Uint16 addr )
 {
 	int n = 16;
-	umon_printf(":000%04X", addr);
+	umon_printf(":000%04X:", addr);
 	while (n--)
-		umon_printf(" %02X", cpu65_read_callback(addr++));
+		umon_printf("%02X", cpu65_read_callback(addr++));
 }
 
 void m65mon_dumpmem28 ( int addr )
 {
 	int n = 16;
 	addr &= 0xFFFFFFF;
-	umon_printf(":%07X", addr);
+	umon_printf(":%07X:", addr);
 	while (n--)
-		umon_printf(" %02X", memory_debug_read_phys_addr(addr++));
+		umon_printf("%02X", memory_debug_read_phys_addr(addr++));
 }
 
 void m65mon_setmem28( int addr, int cnt, Uint8* vals )
@@ -517,6 +565,21 @@ void m65mon_set_trace ( int m )
 	paused = m;
 }
 
+#ifdef TRACE_NEXT_SUPPORT
+void m65mon_do_next ( void )
+{
+	if (paused) {
+		umon_send_ok = 0;			// delay command execution!
+		m65mon_callback = m65mon_show_regs;	// register callback
+		trace_next_trigger = 2;			// if JSR, then trigger until RTS to next_addr
+		orig_sp = cpu65.sphi | cpu65.s;
+		paused = 0;
+	} else {
+		umon_printf(UMON_SYNTAX_ERROR "trace can be used only in trace mode");
+	}
+}
+#endif
+
 void m65mon_do_trace ( void )
 {
 	if (paused) {
@@ -524,15 +587,21 @@ void m65mon_do_trace ( void )
 		m65mon_callback = m65mon_show_regs; // register callback
 		trace_step_trigger = 1;	// trigger one step
 	} else {
-		umon_printf(SYNTAX_ERROR "trace can be used only in trace mode");
+		umon_printf(UMON_SYNTAX_ERROR "trace can be used only in trace mode");
 	}
 }
 
 void m65mon_do_trace_c ( void )
 {
-	umon_printf(SYNTAX_ERROR "command 'tc' is not implemented yet");
+	umon_printf(UMON_SYNTAX_ERROR "command 'tc' is not implemented yet");
 }
-
+#ifdef TRACE_NEXT_SUPPORT
+void m65mon_next_command ( void )
+{
+	if (paused)
+		m65mon_do_next();
+}
+#endif
 void m65mon_empty_command ( void )
 {
 	if (paused)
@@ -554,6 +623,21 @@ static int cycles, frameskip;
 static void emulation_loop ( void )
 {
 	for (;;) {
+#ifdef TRACE_NEXT_SUPPORT
+		if (trace_next_trigger == 2) {
+			if (cpu65.op == 0x20) {		// was the current opcode a JSR $nnnn ? (0x20)
+				trace_next_trigger = 1;	// if so, let's loop until the stack pointer returns back, then pause
+			} else {
+				trace_next_trigger = 0;	// if the current opcode wasn't a JSR, then lets pause immediately after
+				paused = 1;
+			}
+		} else if (trace_next_trigger == 1) {	// are we presently stepping over a JSR?
+			if ((cpu65.sphi | cpu65.s) == orig_sp ) {	// did the current sp return to its original position?
+				trace_next_trigger = 0;	// if so, lets pause the emulation, as we have successfully stepped over the JSR
+				paused = 1;
+			}
+		}
+#endif
 		while (XEMU_UNLIKELY(paused)) {	// paused special mode, ie tracing support, or something ...
 			if (XEMU_UNLIKELY(dma_status))
 				break;		// if DMA is pending, do not allow monitor/etc features
@@ -639,10 +723,14 @@ static void emulation_loop ( void )
 
 int main ( int argc, char **argv )
 {
+	srand(time(NULL));	// TODO: maybe move this into the core framework (also rand() usages, not just this init part ...)
 	xemu_pre_init(APP_ORG, TARGET_NAME, "The Incomplete MEGA65 emulator from LGB");
 	xemucfg_define_str_option("8", NULL, "Path of EXTERNAL D81 disk image (not on/the SD-image)");
+	xemucfg_define_switch_option("driveled", "Render drive LED at the top right corner of the screen");
+	xemucfg_define_switch_option("allowmousegrab", "Allow auto mouse grab with left-click");
 	xemucfg_define_num_option("dmarev", 0x100, "DMA revision (0/1=F018A/B +256=autochange, +512=modulo, you always wants +256!)");
-	xemucfg_define_num_option("fastclock", MEGA65_DEFAULT_FAST_CLOCK, "Clock of M65 fast mode (in MHz)");
+	xemucfg_define_float_option("fastclock", MEGA65_DEFAULT_FAST_CLOCK, "Clock of M65 fast mode (in MHz)");
+	xemucfg_define_num_option("model", 255, "Emulated MEGA65 model (255=custom/Xemu)");
 	xemucfg_define_str_option("fpga", NULL, "Comma separated list of FPGA-board switches turned ON");
 	xemucfg_define_switch_option("fullscreen", "Start in fullscreen mode");
 	xemucfg_define_switch_option("hyperdebug", "Crazy, VERY slow and 'spammy' hypervisor debug mode");
@@ -659,6 +747,8 @@ int main ( int argc, char **argv )
 	xemucfg_define_switch_option("forcerom", "Re-fill 'ROM' from external source on start-up, requires option -loadrom <filename>");
 	xemucfg_define_switch_option("fontrefresh", "Upload character ROM from the loaded ROM image");
 	xemucfg_define_str_option("sdimg", SDCARD_NAME, "Override path of SD-image to be used (also see the -virtsd option!)");
+	xemucfg_define_num_option("rtchofs", 0, "RTC (and CIA TOD) default offset to real-time (mostly for testing!)");
+	xemucfg_define_str_option("dumpmem", NULL, "Save memory content on exit");
 #ifdef VIRTUAL_DISK_IMAGE_SUPPORT
 	xemucfg_define_switch_option("virtsd", "Interpret -sdimg option as a DIRECTORY to be fed onto the FAT32FS and use virtual-in-memory disk storage.");
 #endif
@@ -692,7 +782,10 @@ int main ( int argc, char **argv )
 	xemucfg_define_switch_option("besure", "Skip asking \"are you sure?\" on RESET or EXIT");
 	if (xemucfg_parse_all(argc, argv))
 		return 1;
+	show_drive_led = xemucfg_get_bool("driveled");
 	i_am_sure_override = xemucfg_get_bool("besure");
+	mega65_model = xemucfg_get_num("model");
+	DEBUGPRINT("XEMU: emulated MEGA65 model ID: %d" NL, mega65_model);
 #ifdef HAVE_XEMU_INSTALLER
 	xemu_set_installer(xemucfg_get_str("installer"));
 #endif
@@ -724,8 +817,12 @@ int main ( int argc, char **argv )
 		SID_CYCLES_PER_SEC,		// SID cycles per sec
 		AUDIO_SAMPLE_FREQ		// sound mix freq
 	);
+	allow_mouse_grab = xemucfg_get_bool("allowmousegrab");
+	rtc_hour_offset = xemucfg_get_num("rtchofs");
 	skip_unhandled_mem = xemucfg_get_bool("skipunhandledmem");
 	DEBUGPRINT("MEM: UNHANDLED memory policy: %d" NL, skip_unhandled_mem);
+	if (skip_unhandled_mem)
+		skip_unhandled_mem = 3;
 	eth65_init(
 #ifdef HAVE_ETHERTAP
 		xemucfg_get_str("ethertap")

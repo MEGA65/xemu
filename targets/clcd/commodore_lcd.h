@@ -1,5 +1,5 @@
 /* Commodore LCD emulator.
-   Copyright (C)2016,2018,2019 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016,2018-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
    Part of the Xemu project: https://github.com/lgblgblgb/xemu
 
 This program is free software; you can redistribute it and/or modify
@@ -28,6 +28,6 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #define RENDER_SCALE_QUALITY	1
 
 #define ROM_HACK_COLD_START
-#define ROM_HACK_NEW_ROM_SEARCHING
+//#define ROM_HACK_NEW_ROM_SEARCHING
 
 #endif

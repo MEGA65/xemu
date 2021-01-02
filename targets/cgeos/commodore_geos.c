@@ -203,7 +203,6 @@ static void vic2_interrupt_checker ( void )
 
 void vic2_check_raster_interrupt ( void )
 {
-	// I'm lame even with VIC2 knowledge it seems
 	// C65 seems to use raster interrupt to generate the usual periodic IRQ
 	// (which was done with CIA on C64) in raster line 511. However as
 	// raster line 511 can never be true, I really don't know what to do.
@@ -782,8 +781,8 @@ static void update_emulator ( void )
 	// Ugly CIA trick to maintain realtime TOD in CIAs :)
 	const struct tm *t = xemu_get_localtime();
 	const Uint8 sec10ths = xemu_get_microseconds() / 100000;
-	cia_ugly_tod_updater(&cia1, t, sec10ths);
-	cia_ugly_tod_updater(&cia2, t, sec10ths);
+	cia_ugly_tod_updater(&cia1, t, sec10ths, 0);
+	cia_ugly_tod_updater(&cia2, t, sec10ths, 0);
 }
 
 
