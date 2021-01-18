@@ -1,6 +1,6 @@
 /* A work-in-progess MEGA65 (Commodore 65 clone origins) emulator
    Part of the Xemu project, please visit: https://github.com/lgblgblgb/xemu
-   Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016-2021 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -375,7 +375,7 @@ static void mega65_init ( void )
 	);
 	cia2.DDRA = 3; // Ugly workaround ... I think, SD-card setup "CRAM UTIL" (or better: the kickstart) should set this by its own. Maybe Xemu bug, maybe not?
 	// *** Initialize DMA (we rely on memory and I/O decoder provided functions here for the purpose)
-	dma_init(newhack ? DMA_FEATURE_HACK | DMA_FEATURE_DYNMODESET : xemucfg_get_num("dmarev"));
+	dma_init(newhack ? DMA_FEATURE_HACK | DMA_FEATURE_DYNMODESET | xemucfg_get_num("dmarev") : xemucfg_get_num("dmarev"));
 	// Initialize FDC
 	fdc_init(disk_buffers + FD_BUFFER_POS);
 	//
@@ -460,6 +460,7 @@ void reset_mega65 ( void )
 	vic_registers[0x30] = 0;	// FIXME: hack! we need this, and memory_set_vic3_rom_mapping above too :(
 	memory_set_vic3_rom_mapping(0);
 	memory_set_do_map();
+	vic_reset();	// FIXME: we may need a RESET on VIC-IV what ROM would not initialize but could be used by some MEGA65-aware program? [and hyppo does not care to reset?]
 	cpu65_reset();
 	dma_reset();
 	nmi_level = 0;
@@ -728,7 +729,7 @@ int main ( int argc, char **argv )
 	xemucfg_define_str_option("8", NULL, "Path of EXTERNAL D81 disk image (not on/the SD-image)");
 	xemucfg_define_switch_option("driveled", "Render drive LED at the top right corner of the screen");
 	xemucfg_define_switch_option("allowmousegrab", "Allow auto mouse grab with left-click");
-	xemucfg_define_num_option("dmarev", 0x100, "DMA revision (0/1=F018A/B +256=autochange, +512=modulo, you always wants +256!)");
+	xemucfg_define_num_option("dmarev", 2 + 0x100, "DMA revision (0/1/2=F018A/B/auto +256=autochange, +512=modulo, you always wants +256!)");
 	xemucfg_define_float_option("fastclock", MEGA65_DEFAULT_FAST_CLOCK, "Clock of M65 fast mode (in MHz)");
 	xemucfg_define_num_option("model", 255, "Emulated MEGA65 model (255=custom/Xemu)");
 	xemucfg_define_str_option("fpga", NULL, "Comma separated list of FPGA-board switches turned ON");
@@ -780,6 +781,9 @@ int main ( int argc, char **argv )
 	xemucfg_define_str_option("keymap", KEYMAP_USER_FILENAME, "Set keymap configuration file to be used");
 #endif
 	xemucfg_define_switch_option("besure", "Skip asking \"are you sure?\" on RESET or EXIT");
+#ifdef SDL_HINT_RENDER_SCALE_QUALITY
+	xemucfg_define_num_option("sdlrenderquality", RENDER_SCALE_QUALITY, "Setting SDL hint for scaling method/quality on rendering (0, 1, 2)");
+#endif
 	if (xemucfg_parse_all(argc, argv))
 		return 1;
 	show_drive_led = xemucfg_get_bool("driveled");
@@ -804,7 +808,11 @@ int main ( int argc, char **argv )
 		0,				// we have *NO* pre-defined colours as with more simple machines (too many we need). we want to do this ourselves!
 		NULL,				// -- "" --
 		NULL,				// -- "" --
-		RENDER_SCALE_QUALITY,		// render scaling quality
+#ifdef SDL_HINT_RENDER_SCALE_QUALITY
+		xemucfg_get_ranged_num("sdlrenderquality", 0, 2),	// render scaling quality
+#else
+		RENDER_SCALE_QUALITY,
+#endif
 		USE_LOCKED_TEXTURE,		// 1 = locked texture access
 		shutdown_callback		// registered shutdown function
 	))

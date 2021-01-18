@@ -135,6 +135,7 @@ typedef uint64_t Uint64;
 #	define DIRSEP_STR	"/"
 #	define DIRSEP_CHR	'/'
 #	define NL		"\n"
+#	define NL_LENGTH	1
 #	define PRINTF_LLD	"%lld"
 #	define PRINTF_LLU	"%llu"
 #	define MKDIR(__n)	mkdir((__n), 0777)
@@ -142,6 +143,7 @@ typedef uint64_t Uint64;
 #	define DIRSEP_STR	"\\"
 #	define DIRSEP_CHR	'\\'
 #	define NL		"\r\n"
+#	define NL_LENGTH	2
 #	define PRINTF_LLD	"%I64d"
 #	define PRINTF_LLU	"%I64u"
 #	define MKDIR(__n)	mkdir(__n)
@@ -167,6 +169,7 @@ extern int chatty_xemu;
 
 #ifndef __BIGGEST_ALIGNMENT__
 #define __BIGGEST_ALIGNMENT__	16
+#define XEMU_MISSING_BIGGEST_ALIGNMENT_WORKAROUND
 #endif
 #define ALIGNED(n) __attribute__ ((aligned (n)))
 #define MAXALIGNED ALIGNED(__BIGGEST_ALIGNMENT__)
@@ -241,7 +244,21 @@ static XEMU_INLINE unsigned char XEMU_BYTE_TO_BCD ( unsigned char b ) {
 	return ((b / 10) << 4) + (b % 10);
 }
 
+// this function is similar to strcpy() however:
+// * it does not copy the final '\0'
+// * it returns with the _updated_ 'target' pointer, not the original!
+static inline void *xemu_strcpy_special ( void *target, const void *source )
+{
+	while (*(char *)source)
+		*(char *)target++ = *(char *)source++;
+	return target;
+}
+
 #define VOIDPTR_TO_INT(x)	((int)(intptr_t)(void*)(x))
 #define VOIDPTR_TO_UINT(x)	((unsigned int)(uintptr_t)(void*)(x))
+
+// Stringification
+#define TO_STR_LEVEL1_(x)	#x			// stringification argument
+#define STRINGIFY(x)		TO_STR_LEVEL1_(x)	// level of indirection to be able to expand argument given as macros
 
 #endif

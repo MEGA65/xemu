@@ -32,6 +32,9 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #include "uart_monitor.h"
 #include "xemu/f011_core.h"
 #include "vic4.h"
+#include "xemu/f018_core.h"
+#include "memory_mapper.h"
+#include "xemu/basic_text.h"
 
 
 static int attach_d81 ( const char *fn )
@@ -112,10 +115,7 @@ static void ui_run_prg_by_browsing ( void )
 		DEBUGPRINT("UI: file selection for PRG injection was cancelled." NL);
 }
 
-#ifdef BASIC_TEXT_SUPPORT
-#include "xemu/basic_text.h"
-#include "memory_mapper.h"
-
+#ifdef CBM_BASIC_TEXT_SUPPORT
 static void ui_save_basic_as_text ( void )
 {
 	Uint8 *start = main_ram + 0x2001;
@@ -295,6 +295,55 @@ static void ui_cb_show_drive_led ( const struct menu_st *m, int *query )
 	show_drive_led = !show_drive_led;
 }
 
+static void ui_emu_info ( void )
+{
+	char td_stat_str[XEMU_CPU_STAT_INFO_BUFFER_SIZE];
+	xemu_get_timing_stat_string(td_stat_str, sizeof td_stat_str);
+	char uname_str[100];
+	xemu_get_uname_string(uname_str, sizeof uname_str);
+	INFO_WINDOW(
+		"DMA chip current revision: %d (F018 rev-%s)\n"
+		"ROM version detected: %d%s\n"
+		"C64 'CPU' I/O port (low 3 bits): DDR=%d OUT=%d\n"
+		"Current VIC I/O mode: %s, hot registers are %s\n"
+		"\n"
+		"Xemu host CPU usage so far: %s\n"
+		"Xemu's host OS: %s"
+		,
+		dma_chip_revision, dma_chip_revision ? "B, new" : "A, old",
+		rom_date, rom_date > 0 ? "" : " (unknown or bad ROM signature)",
+		memory_get_cpu_io_port(0) & 7, memory_get_cpu_io_port(1) & 7,
+		vic_iomode < 4 ? iomode_names[vic_iomode] : "?INVALID?", (vic_registers[0x5D] & 0x80) ? "enabled" : "disabled",
+		td_stat_str,
+		uname_str
+	);
+}
+
+
+static void ui_put_screen_text_into_paste_buffer ( void )
+{
+	char text[8192];
+	char *result = xemu_cbm_screen_to_text(
+		text,
+		sizeof text,
+		main_ram + ((vic_registers[0x31] & 0x80) ? (vic_registers[0x18] & 0xE0) << 6 : (vic_registers[0x18] & 0xF0) << 6),	// pointer to screen RAM, try to audo-tected: FIXME: works only in bank0!
+		(vic_registers[0x31] & 0x80) ? 80 : 40,		// number of columns, try to auto-detect it
+		25,						// number of rows
+		(vic_registers[0x18] & 2)			// lowercase font? try to auto-detect by checking selected address chargen addr, LSB
+	);
+	if (result == NULL)
+		return;
+	if (*result) {
+		if (SDL_SetClipboardText(result))
+			ERROR_WINDOW("Cannot insert text into the OS paste buffer: %s", SDL_GetError());
+		else
+			OSD(-1, -1, "Copied to OS paste buffer.");
+	} else
+		INFO_WINDOW("Screen is empty, nothing to capture.");
+}
+
+
+
 
 /**** MENU SYSTEM ****/
 
@@ -308,6 +357,10 @@ static const struct menu_st menu_display[] = {
 					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_set_mouse_grab, NULL },
 	{ "Show drive LED",		XEMUGUI_MENUID_CALLABLE |
 					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_show_drive_led, NULL },
+#ifdef XEMU_FILES_SCREENSHOT_SUPPORT
+	{ "Screenshot",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_set_integer_to_one, &register_screenshot_request },
+#endif
+	{ "Screen to OS paste buffer",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_put_screen_text_into_paste_buffer },
 	{ NULL }
 };
 static const struct menu_st menu_sdcard[] = {
@@ -331,6 +384,7 @@ static const struct menu_st menu_debug[] = {
 	{ "OSD key debugger",		XEMUGUI_MENUID_CALLABLE |
 					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_osd_key_debugger, NULL },
 	{ "Dump memory info file",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_dump_memory },
+	{ "Emulation state info",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_emu_info },
 	{ NULL }
 };
 #ifdef HAVE_XEMU_EXEC_API
@@ -357,11 +411,8 @@ static const struct menu_st menu_main[] = {
 	{ "Reset",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_reset   },
 	{ "Debug",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_debug   },
 	{ "Run PRG directly",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_run_prg_by_browsing },
-#ifdef BASIC_TEXT_SUPPORT
+#ifdef CBM_BASIC_TEXT_SUPPORT
 	{ "Save BASIC as text",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_save_basic_as_text },
-#endif
-#ifdef XEMU_FILES_SCREENSHOT_SUPPORT
-	{ "Screenshot",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_set_integer_to_one, &register_screenshot_request },
 #endif
 #ifdef XEMU_ARCH_WIN
 	{ "System console",		XEMUGUI_MENUID_CALLABLE |
