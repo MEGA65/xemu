@@ -1,6 +1,6 @@
 /* A work-in-progess MEGA65 (Commodore 65 clone origins) emulator
    Part of the Xemu project, please visit: https://github.com/lgblgblgb/xemu
-   Copyright (C)2016-2020 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
+   Copyright (C)2016-2021 LGB (Gábor Lénárt) <lgblgblgb@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -31,10 +31,12 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #include "input_devices.h"
 #include "uart_monitor.h"
 #include "xemu/f011_core.h"
-#include "vic4.h"
-#include "xemu/f018_core.h"
+#include "dma65.h"
 #include "memory_mapper.h"
 #include "xemu/basic_text.h"
+#include "audio65.h"
+#include "vic4.h"
+#include "configdb.h"
 
 
 static int attach_d81 ( const char *fn )
@@ -291,8 +293,8 @@ static void ui_dump_memory ( void )
 
 static void ui_cb_show_drive_led ( const struct menu_st *m, int *query )
 {
-	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, show_drive_led);
-	show_drive_led = !show_drive_led;
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, configdb.show_drive_led);
+	configdb.show_drive_led = !configdb.show_drive_led;
 }
 
 static void ui_emu_info ( void )
@@ -343,6 +345,37 @@ static void ui_put_screen_text_into_paste_buffer ( void )
 }
 
 
+static void ui_put_paste_buffer_into_screen_text ( void )
+{
+	char *t = SDL_GetClipboardText();
+	if (t == NULL)
+		goto no_clipboard;
+	char *t2 = t;
+	while (*t2 && (*t2 == '\t' || *t2 == '\r' || *t2 == '\n' || *t2 == ' '))
+		t2++;
+	if (!*t2)
+		goto no_clipboard;
+	xemu_cbm_text_to_screen(
+		main_ram + ((vic_registers[0x31] & 0x80) ? (vic_registers[0x18] & 0xE0) << 6 : (vic_registers[0x18] & 0xF0) << 6),	// pointer to screen RAM, try to audo-tected: FIXME: works only in bank0!
+		(vic_registers[0x31] & 0x80) ? 80 : 40,		// number of columns, try to auto-detect it
+		25,						// number of rows
+		t2,						// text buffer as input
+		(vic_registers[0x18] & 2)			// lowercase font? try to auto-detect by checking selected address chargen addr, LSB
+	);
+	SDL_free(t);
+	return;
+no_clipboard:
+	if (t)
+		SDL_free(t);
+	ERROR_WINDOW("Clipboard query error, or clipboard was empty");
+}
+
+
+static void ui_cb_mono_downmix ( const struct menu_st *m, int *query )
+{
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, VOIDPTR_TO_INT(m->user_data) == stereo_separation);
+	audio_set_stereo_parameters(AUDIO_UNCHANGED_VOLUME, VOIDPTR_TO_INT(m->user_data));
+}
 
 
 /**** MENU SYSTEM ****/
@@ -361,6 +394,7 @@ static const struct menu_st menu_display[] = {
 	{ "Screenshot",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_set_integer_to_one, &register_screenshot_request },
 #endif
 	{ "Screen to OS paste buffer",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_put_screen_text_into_paste_buffer },
+	{ "OS paste buffer to screen",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_put_paste_buffer_into_screen_text },
 	{ NULL }
 };
 static const struct menu_st menu_sdcard[] = {
@@ -404,8 +438,34 @@ static const struct menu_st menu_d81[] = {
 					XEMUGUI_MENUFLAG_QUERYBACK,	ui_detach_d81, NULL },
 	{ NULL }
 };
+static const struct menu_st menu_audio[] = {
+	{ "Hard stereo separation",	XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*) 100 },
+	{ "Mono downmix 80%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*)  80 },
+	{ "Mono downmix 60%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*)  60 },
+	{ "Mono downmix 40%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*)  40 },
+	{ "Mono downmix 20%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*)  20 },
+	{ "Mono downmix",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*)   0 },
+	{ "Mono downmix -20%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*) -20 },
+	{ "Mono downmix -40%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*) -40 },
+	{ "Mono downmix -60%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*) -60 },
+	{ "Mono downmix -80%",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*) -80 },
+	{ "Hard stereo - reserved",	XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*)-100 },
+	{ NULL }
+};
 static const struct menu_st menu_main[] = {
 	{ "Display",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_display },
+	{ "Audio",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_audio   },
 	{ "SD-card",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_sdcard  },
 	{ "FD D81",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_d81     },
 	{ "Reset",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_reset   },
