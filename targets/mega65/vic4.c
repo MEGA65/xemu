@@ -48,7 +48,6 @@ const char *iomode_names[4] = { "VIC2", "VIC3", "BAD!", "VIC4" };
 
 Uint8 vic_registers[0x80];		// VIC-4 registers
 int vic_iomode;				// VIC2/VIC3/VIC4 mode
-int force_fast;				// POKE 0,64 and 0,65 trick ...
 int scanline;				// current scan line number
 int cpu_cycles_per_scanline;
 static int compare_raster;		// raster compare (9 bits width) data
@@ -128,7 +127,6 @@ void vic_init ( void )
 	black_colour = SDL_MapRGBA(sdl_pix_fmt, 0x00, 0x00, 0x00, 0xFF);
 	// Init VIC4 palette
 	vic4_init_palette();
-	force_fast = 0;
 	// *** Init VIC4 registers
 	scanline = 0;
 	vic_reset();
@@ -363,9 +361,9 @@ void vic_write_reg ( unsigned int addr, Uint8 data )
 			}
 			break;
 		CASE_VIC_4(0x70):	// VIC-IV palette selection register
-			palette		= ((data & 0x03) << 8) + vic_palettes;
+			altpalette	= ((data & 0x03) << 8) + vic_palettes;
 			spritepalette	= ((data & 0x0C) << 6) + vic_palettes;
-			altpalette	= ((data & 0x30) << 4) + vic_palettes;
+			palette		= ((data & 0x30) << 4) + vic_palettes;
 			palregaccofs	= ((data & 0xC0) << 2);
 			check_if_rom_palette(vic_registers[0x30] & 4);
 			break;
@@ -876,8 +874,8 @@ static void render_sprite ( int sprite_no, int sprite_mask, Uint8 *data, Uint32 
 		colours[1] = VIC_REG_COLOUR(0x25);
 		colours[3] = VIC_REG_COLOUR(0x26);
 	}
-	p += SCREEN_WIDTH * (sprite_y + TOP_BORDER_SIZE) + LEFT_BORDER_SIZE;
-	for (y = sprite_y; y < lim_y; y += (expand_y ? 2 : 1), p += SCREEN_WIDTH * (expand_y ? 2 : 1))
+	p += TEXTURE_WIDTH * (sprite_y + TOP_BORDER_SIZE) + LEFT_BORDER_SIZE;
+	for (y = sprite_y; y < lim_y; y += (expand_y ? 2 : 1), p += TEXTURE_WIDTH * (expand_y ? 2 : 1))
 		if (y < 0 || y >= 200)
 			data += 3;	// skip one line (three bytes) of sprite data if outside of screen
 		else {
@@ -890,13 +888,13 @@ static void render_sprite ( int sprite_no, int sprite_mask, Uint8 *data, Uint32 
 							if (x >= 0 && x < 640) {
 								p[x] = p[x + 1] = p[x + 2] = p[x + 3] = col;
 								if (expand_y && y < 200)
-									p[x + SCREEN_WIDTH] = p[x + SCREEN_WIDTH + 1] = p[x + SCREEN_WIDTH + 2] = p[x + SCREEN_WIDTH + 3] = col;
+									p[x + TEXTURE_WIDTH] = p[x + TEXTURE_WIDTH + 1] = p[x + TEXTURE_WIDTH + 2] = p[x + TEXTURE_WIDTH + 3] = col;
 							}
 							x += 4;
 							if (expand_x && x >= 0 && x < 640) {
 								p[x] = p[x + 1] = p[x + 2] = p[x + 3] = col;
 								if (expand_y && y < 200)
-									p[x + SCREEN_WIDTH] = p[x + SCREEN_WIDTH + 1] = p[x + SCREEN_WIDTH + 2] = p[x + SCREEN_WIDTH + 3] = col;
+									p[x + TEXTURE_WIDTH] = p[x + TEXTURE_WIDTH + 1] = p[x + TEXTURE_WIDTH + 2] = p[x + TEXTURE_WIDTH + 3] = col;
 								x += 4;
 							}
 						} else
@@ -908,13 +906,13 @@ static void render_sprite ( int sprite_no, int sprite_mask, Uint8 *data, Uint32 
 							if (x >= 0 && x < 640) {
 								p[x] = p[x + 1] = colours[2];
 								if (expand_y && y < 200)
-									p[x + SCREEN_WIDTH] = p[x + SCREEN_WIDTH + 1] = colours[2];
+									p[x + TEXTURE_WIDTH] = p[x + TEXTURE_WIDTH + 1] = colours[2];
 							}
 							x += 2;
 							if (expand_x && x >= 0 && x < 640) {
 								p[x] = p[x + 1] = colours[2];
 								if (expand_y && y < 200)
-									p[x + SCREEN_WIDTH] = p[x + SCREEN_WIDTH + 1] = colours[2];
+									p[x + TEXTURE_WIDTH] = p[x + TEXTURE_WIDTH + 1] = colours[2];
 								x += 2;
 							}
 						} else
@@ -971,8 +969,9 @@ void vic_render_screen ( void )
 			1,
 			2,
 			NULL,	// allow function to figure it out ;)
-			SCREEN_WIDTH,
-			SCREEN_HEIGHT
+			TEXTURE_WIDTH,
+			TEXTURE_HEIGHT,
+			TEXTURE_WIDTH
 		)) {
 			const char *p = strrchr(xemu_screenshot_full_path, DIRSEP_CHR);
 			if (p)
@@ -983,7 +982,7 @@ void vic_render_screen ( void )
 	if (configdb.show_drive_led && fdc_get_led_state(16))
 		for (int y = 0; y < 8; y++)
 			for (int x = 0; x < 8; x++)
-				*(p_sdl + (SCREEN_WIDTH) - 10 + x + (y + 2) * (SCREEN_WIDTH)) = x > 1 && x < 7 && y > 1 && y < 7 ? red_colour : black_colour;
+				*(p_sdl + (TEXTURE_WIDTH) - 10 + x + (y + 2) * (TEXTURE_WIDTH)) = x > 1 && x < 7 && y > 1 && y < 7 ? red_colour : black_colour;
 	xemu_update_screen();
 }
 

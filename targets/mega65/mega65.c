@@ -84,8 +84,6 @@ void cpu65_illegal_opcode_callback ( void )
 void machine_set_speed ( int verbose )
 {
 	int speed_wanted;
-	// TODO: MEGA65 speed is not handled yet. Reasons: too slow emulation for average PC, and the complete control of speed, ie lack of C128-fast (2MHz mode,
-	// because of incomplete VIC register I/O handling).
 	// Actually the rule would be something like that (this comment is here by intent, for later implementation FIXME TODO), some VHDL draft only:
 	// cpu_speed := vicii_2mhz&viciii_fast&viciv_fast
 	// if hypervisor_mode='0' and ((speed_gate='1') and (force_fast='0')) then -- LGB: vicii_2mhz seems to be a low-active signal?
@@ -99,10 +97,10 @@ void machine_set_speed ( int verbose )
 	//	return;
 	if (verbose)
 		DEBUGPRINT("SPEED: in_hypervisor=%d force_fast=%d c128_fast=%d, c65_fast=%d m65_fast=%d" NL,
-			in_hypervisor, force_fast, (c128_d030_reg & 1), vic_registers[0x31] & 64, vic_registers[0x54] & 64
+			in_hypervisor, D6XX_registers[0x7D] & 16, (c128_d030_reg & 1), vic_registers[0x31] & 64, vic_registers[0x54] & 64
 	);
 	// ^1 at c128... because it was inverted :-O --> FIXME: this is ugly workaround, the switch statement should be re-organized
-	speed_wanted = (in_hypervisor || force_fast) ? 7 : ((((c128_d030_reg & 1) ^ 1) << 2) | ((vic_registers[0x31] & 64) >> 5) | ((vic_registers[0x54] & 64) >> 6));
+	speed_wanted = (in_hypervisor || (D6XX_registers[0x7D] & 16)) ? 7 : ((((c128_d030_reg & 1) ^ 1) << 2) | ((vic_registers[0x31] & 64) >> 5) | ((vic_registers[0x54] & 64) >> 6));
 	if (speed_wanted != speed_current) {
 		speed_current = speed_wanted;
 		switch (speed_wanted) {
@@ -433,7 +431,7 @@ static void shutdown_callback ( void )
 void reset_mega65 ( void )
 {
 	eth65_reset();
-	force_fast = 0;	// FIXME: other default speed controls on reset?
+	D6XX_registers[0x7D] &= ~16;	// FIXME: other default speed controls on reset?
 	c128_d030_reg = 0xFF;
 	machine_set_speed(0);
 	memory_set_cpu_io_port_ddr_and_data(0xFF, 0xFF);
@@ -487,7 +485,8 @@ static void update_emulator ( void )
 	// UPDATE the RTC too:
 	rtc_regs[0] = XEMU_BYTE_TO_BCD(t->tm_sec);	// seconds
 	rtc_regs[1] = XEMU_BYTE_TO_BCD(t->tm_min);	// minutes
-	rtc_regs[2] = xemu_hour_to_bcd12h(t->tm_hour, configdb.rtc_hour_offset);	// hours
+	//rtc_regs[2] = xemu_hour_to_bcd12h(t->tm_hour, configdb.rtc_hour_offset);	// hours
+	rtc_regs[2] = XEMU_BYTE_TO_BCD((t->tm_hour + configdb.rtc_hour_offset + 24) % 24) | 0x80;	// hours (24H format, bit 7 always set)
 	rtc_regs[3] = XEMU_BYTE_TO_BCD(t->tm_mday);	// day of mounth
 	rtc_regs[4] = XEMU_BYTE_TO_BCD(t->tm_mon) + 1;	// month
 	rtc_regs[5] = XEMU_BYTE_TO_BCD(t->tm_year - 100);	// year
@@ -723,10 +722,10 @@ int main ( int argc, char **argv )
 	if (xemu_post_init(
 		TARGET_DESC APP_DESC_APPEND,	// window title
 		1,				// resizable window
-		SCREEN_WIDTH, SCREEN_HEIGHT,	// texture sizes
-		SCREEN_WIDTH, SCREEN_HEIGHT * 2,// logical size (used with keeping aspect ratio by the SDL render stuffs)
-		SCREEN_WIDTH, SCREEN_HEIGHT * 2,// window size
-		SCREEN_FORMAT,			// pixel format
+		TEXTURE_WIDTH, TEXTURE_HEIGHT,	// texture sizes
+		TEXTURE_WIDTH, TEXTURE_HEIGHT * 2,// logical size (used with keeping aspect ratio by the SDL render stuffs)
+		TEXTURE_WIDTH, TEXTURE_HEIGHT * 2,// window size
+		TEXTURE_FORMAT,			// pixel format
 		0,				// we have *NO* pre-defined colours as with more simple machines (too many we need). we want to do this ourselves!
 		NULL,				// -- "" --
 		NULL,				// -- "" --
@@ -808,8 +807,6 @@ int main ( int argc, char **argv )
 #define SNAPSHOT_M65_BLOCK_VERSION	2
 #define SNAPSHOT_M65_BLOCK_SIZE		(0x100 + sizeof(D6XX_registers) + sizeof(D7XX))
 
-static int force_fast_loaded;
-
 
 int m65emu_snapshot_load_state ( const struct xemu_snapshot_definition_st *def, struct xemu_snapshot_block_st *block )
 {
@@ -833,7 +830,7 @@ int m65emu_snapshot_load_state ( const struct xemu_snapshot_definition_st *def, 
 	in_hypervisor = (int)P_AS_BE32(buffer + 16);	// sets hypervisor state from snapshot (hypervisor/userspace)
 	map_megabyte_low = (int)P_AS_BE32(buffer + 20);
 	map_megabyte_high = (int)P_AS_BE32(buffer + 24);
-	force_fast_loaded = (int)P_AS_BE32(buffer + 28);	// activated in m65emu_snapshot_loading_finalize() as force_fast can be set at multiple places through loading snapshot!
+	//force_fast_loaded = (int)P_AS_BE32(buffer + 28);	// activated in m65emu_snapshot_loading_finalize() as force_fast can be set at multiple places through loading snapshot!
 	// +32 is free for 4 bytes now ... can be used later
 	memory_set_cpu_io_port_ddr_and_data(buffer[36], buffer[37]);
 	return 0;
@@ -854,7 +851,7 @@ int m65emu_snapshot_save_state ( const struct xemu_snapshot_definition_st *def )
 	U32_AS_BE(buffer + 16, in_hypervisor);
 	U32_AS_BE(buffer + 20, map_megabyte_low);
 	U32_AS_BE(buffer + 24, map_megabyte_high);
-	U32_AS_BE(buffer + 28, force_fast);	// see notes on this at load_state and finalize stuff!
+	//U32_AS_BE(buffer + 28, force_fast);	// see notes on this at load_state and finalize stuff!
 	// +32 is free for 4 bytes now ... can be used later
 	buffer[36] = memory_get_cpu_io_port(0);
 	buffer[37] = memory_get_cpu_io_port(1);
@@ -869,7 +866,7 @@ int m65emu_snapshot_loading_finalize ( const struct xemu_snapshot_definition_st 
 	DEBUGPRINT("SNAP: loaded (finalize-callback: begin)" NL);
 	memory_set_vic3_rom_mapping(vic_registers[0x30]);
 	memory_set_do_map();
-	force_fast = force_fast_loaded;	// force_fast is handled through different places, so we must have a "finalize" construct and saved separately to have the actual effect ...
+	//force_fast = force_fast_loaded;	// force_fast is handled through different places, so we must have a "finalize" construct and saved separately to have the actual effect ...
 	machine_set_speed(1);
 	DEBUGPRINT("SNAP: loaded (finalize-callback: end)" NL);
 	OSD(-1, -1, "Snapshot has been loaded.");
