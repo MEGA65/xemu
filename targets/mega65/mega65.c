@@ -296,7 +296,7 @@ static void mega65_init ( void )
 #ifdef HID_KBD_MAP_CFG_SUPPORT
 	hid_keymap_from_config_file(configdb.keymap);
 #endif
-	joystick_emu = 1;
+	joystick_emu = 2;	// use joystick port #2 by default
 	nmi_level = 0;
 	// *** FPGA switches ...
 	do {
@@ -383,6 +383,7 @@ static void mega65_init ( void )
 	// Initialize FDC
 	fdc_init(disk_buffers + FD_BUFFER_POS);
 	//
+	sdcard_hack_mount_drive_9_now(configdb.disk9);
 #ifdef HAS_UARTMON_SUPPORT
 	uartmon_init(configdb.uartmon);
 #endif
@@ -516,12 +517,16 @@ void m65mon_show_regs ( void )
 {
 	Uint8 pf = cpu65_get_pf();
 	umon_printf(
+		"\r\n"
 		"PC   A  X  Y  Z  B  SP   MAPL MAPH LAST-OP     P  P-FLAGS   RGP uS IO\r\n"
 		"%04X %02X %02X %02X %02X %02X %04X "		// register banned message and things from PC to SP
 		"%04X %04X %02X       %02X %02X "		// from MAPL to P
-		"%c%c%c%c%c%c%c%c ",				// P-FLAGS
+		"%c%c%c%c%c%c%c%c \r\n"				// P-FLAGS
+		",0777%04X\r\n", // TODO: single line of disassembly
 		cpu65.pc, cpu65.a, cpu65.x, cpu65.y, cpu65.z, cpu65.bphi >> 8, cpu65.sphi | cpu65.s,
-		map_offset_low >> 8, map_offset_high >> 8, cpu65.op,
+		((map_mask & 0xf0) << 8) | (map_offset_low >> 8),
+		((map_mask & 0x0f) << 12)  | (map_offset_high >> 8),
+		cpu65.op,
 		pf, 0,	// flags
 		(pf & CPU65_PF_N) ? 'N' : '-',
 		(pf & CPU65_PF_V) ? 'V' : '-',
@@ -530,7 +535,8 @@ void m65mon_show_regs ( void )
 		(pf & CPU65_PF_D) ? 'D' : '-',
 		(pf & CPU65_PF_I) ? 'I' : '-',
 		(pf & CPU65_PF_Z) ? 'Z' : '-',
-		(pf & CPU65_PF_C) ? 'C' : '-'
+		(pf & CPU65_PF_C) ? 'C' : '-',
+		cpu65.pc
 	);
 }
 
@@ -546,17 +552,30 @@ void m65mon_dumpmem28 ( int addr )
 {
 	int n = 16;
 	addr &= 0xFFFFFFF;
-	umon_printf(":%07X:", addr);
+	umon_printf(":%08X:", addr);
 	while (n--)
-		umon_printf("%02X", memory_debug_read_phys_addr(addr++));
+	{
+		if ( (addr >> 16) == 0x777)
+		{
+			umon_printf("%02X", cpu65_read_callback(addr & 0xffff));
+			addr++;
+		}
+		else
+			umon_printf("%02X", memory_debug_read_phys_addr(addr++));
+	}
 }
 
 void m65mon_setmem28( int addr, int cnt, Uint8* vals )
 {
-  for (int k = 0; k < cnt; k++)
-  {
-    memory_debug_write_phys_addr(addr++, vals[k]);
-  }
+	for (int k = 0; k < cnt; k++)
+	{
+		memory_debug_write_phys_addr(addr++, vals[k]);
+	}
+}
+
+void m65mon_setpc(int addr)
+{
+	cpu65.pc = addr;
 }
 
 void m65mon_set_trace ( int m )
@@ -582,7 +601,7 @@ void m65mon_do_next ( void )
 void m65mon_do_trace ( void )
 {
 	if (paused) {
-		umon_send_ok = 0; // delay command execution!
+		set_umon_send_ok(0); // delay command execution!
 		m65mon_callback = m65mon_show_regs; // register callback
 		trace_step_trigger = 1;	// trigger one step
 	} else {
@@ -644,7 +663,7 @@ static void emulation_loop ( void )
 			if (m65mon_callback) {	// delayed uart monitor command should be finished ...
 				m65mon_callback();
 				m65mon_callback = NULL;
-				uartmon_finish_command();
+				uartmons_finish_command();
 			}
 #endif
 			// we still need to feed our emulator with update events ... It also slows this pause-busy-loop down to every full frames (~25Hz)
@@ -680,6 +699,7 @@ static void emulation_loop ( void )
 		}
 		if (XEMU_UNLIKELY(breakpoint_pc == cpu65.pc)) {
 			DEBUGPRINT("TRACE: Breakpoint @ $%04X hit, Xemu moves to trace mode after the execution of this opcode." NL, cpu65.pc);
+			m65mon_show_regs();
 			paused = 1;
 		}
 		cycles += XEMU_UNLIKELY(dma_status) ? dma_update_multi_steps(cpu_cycles_per_scanline) : cpu65_step(
@@ -701,8 +721,7 @@ static void emulation_loop ( void )
 				scanline = 0;
 				if (!frameskip)	// well, let's only render every full frames (~ie 25Hz)
 					update_emulator();
-				sid1.sFrameCount++;
-				sid2.sFrameCount++;
+				audio65_sid_inc_framecount();
 				frame_counter++;
 				if (frame_counter == 25) {
 					frame_counter = 0;
@@ -803,10 +822,7 @@ int main ( int argc, char **argv )
 	frameskip = 0;
 	frame_counter = 0;
 	vic3_blink_phase = 0;
-	if (audio) {
-		DEBUGPRINT("AUDIO: start" NL);
-		SDL_PauseAudioDevice(audio, 0);
-	}
+	audio65_start();
 	xemu_set_full_screen(configdb.fullscreen_requested);
 	if (!configdb.syscon)
 		sysconsole_close(NULL);

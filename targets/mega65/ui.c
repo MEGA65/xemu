@@ -67,9 +67,16 @@ static int attach_d81 ( const char *fn )
 #ifdef CONFIG_DROPFILE_CALLBACK
 void emu_dropfile_callback ( const char *fn )
 {
-	DEBUGGUI("UI: drop event, file: %s" NL, fn);
-	if (ARE_YOU_SURE("Shall I try to mount the dropped file as D81 for you?", 0))
-		attach_d81(fn);
+	DEBUGGUI("UI: file drop event, file: %s" NL, fn);
+	switch (QUESTION_WINDOW("Cancel|Mount as D81|Run/inject as PRG", "What to do with the dropped file?")) {
+		case 1:
+			attach_d81(fn);
+			break;
+		case 2:
+			reset_mega65();
+			inject_register_prg(fn, 0);
+			break;
+	}
 }
 #endif
 
@@ -77,7 +84,7 @@ void emu_dropfile_callback ( const char *fn )
 static void ui_attach_d81 ( const struct menu_st *m, int *query )
 {
 	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, 0);
-	//ui_attach_d81_by_browsing();
+	const int drive = VOIDPTR_TO_INT(m->user_data);
 	char fnbuf[PATH_MAX + 1];
 	static char dir[PATH_MAX + 1] = "";
 	if (!xemugui_file_selector(
@@ -86,10 +93,21 @@ static void ui_attach_d81 ( const struct menu_st *m, int *query )
 		dir,
 		fnbuf,
 		sizeof fnbuf
-	))
-		attach_d81(fnbuf);
-	else
+	)) {
+		// FIXME: Ugly hack.
+		// Currently, handle only drive-8 via real MEGA65 emulation ("mounting mechanism"), and use
+		// drive-9 outside of Hyppo/etc terrotiry. To correct this, a whole big project would needed,
+		// to rewrite major part of sdcard.c, adopting new Hyppo, etc ...
+		if (drive == 0) {
+			attach_d81(fnbuf);
+		} else {
+			/*int ret =*/ sdcard_hack_mount_drive_9_now(fnbuf);
+			//if (ret)
+			//      DEBUGPRINT("SDCARD: D81: couldn't mount external D81 image" NL);
+		}
+	} else {
 		DEBUGPRINT("UI: file selection for D81 mount was cancelled." NL);
+	}
 }
 
 
@@ -276,14 +294,16 @@ static void ui_start_umon ( const struct menu_st *m, int *query )
 }
 #endif
 
+
+static char last_used_dump_directory[PATH_MAX + 1] = "";
+
 static void ui_dump_memory ( void )
 {
 	char fnbuf[PATH_MAX + 1];
-	static char dir[PATH_MAX + 1] = "";
 	if (!xemugui_file_selector(
 		XEMUGUI_FSEL_SAVE | XEMUGUI_FSEL_FLAG_STORE_DIR,
-		"Dump memory content into file",
-		dir,
+		"Dump main memory content into file",
+		last_used_dump_directory,
 		fnbuf,
 		sizeof fnbuf
 	)) {
@@ -291,10 +311,18 @@ static void ui_dump_memory ( void )
 	}
 }
 
-static void ui_cb_show_drive_led ( const struct menu_st *m, int *query )
+static void ui_dump_hyperram ( void )
 {
-	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, configdb.show_drive_led);
-	configdb.show_drive_led = !configdb.show_drive_led;
+	char fnbuf[PATH_MAX + 1];
+	if (!xemugui_file_selector(
+		XEMUGUI_FSEL_SAVE | XEMUGUI_FSEL_FLAG_STORE_DIR,
+		"Dump hyperRAM content into file",
+		last_used_dump_directory,
+		fnbuf,
+		sizeof fnbuf
+	)) {
+		xemu_save_file(fnbuf, slow_ram, SLOW_RAM_SIZE, "Cannot dump hyperRAM content into file");
+	}
 }
 
 static void ui_emu_info ( void )
@@ -378,6 +406,39 @@ static void ui_cb_mono_downmix ( const struct menu_st *m, int *query )
 }
 
 
+static void ui_cb_audio_volume ( const struct menu_st *m, int *query )
+{
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, VOIDPTR_TO_INT(m->user_data) == audio_volume);
+	audio_set_stereo_parameters(VOIDPTR_TO_INT(m->user_data), AUDIO_UNCHANGED_VOLUME);
+}
+
+
+// FIXME: should be renamed with better name ;)
+// FIXME: should be moved into the core
+static void ui_cb_toggle_int_inverted ( const struct menu_st *m, int *query )
+{
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, !*(int*)m->user_data);
+	*(int*)m->user_data = !*(int*)m->user_data;
+}
+
+
+// FIXME: should be renamed with better name ;)
+// FIXME: should be moved into the core
+static void ui_cb_toggle_int ( const struct menu_st *m, int *query )
+{
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, *(int*)m->user_data);
+	*(int*)m->user_data = !*(int*)m->user_data;
+}
+
+
+static void ui_cb_sids_enabled ( const struct menu_st *m, int *query )
+{
+	const int mask = VOIDPTR_TO_INT(m->user_data);
+	XEMUGUI_RETURN_CHECKED_ON_QUERY(query, (configdb.sidmask & mask));
+	configdb.sidmask ^= mask;
+}
+
+
 /**** MENU SYSTEM ****/
 
 
@@ -386,10 +447,8 @@ static const struct menu_st menu_display[] = {
 	{ "Window - 100%",		XEMUGUI_MENUID_CALLABLE,	xemugui_cb_windowsize, (void*)1 },
 	{ "Window - 200%",		XEMUGUI_MENUID_CALLABLE |
 					XEMUGUI_MENUFLAG_SEPARATOR,	xemugui_cb_windowsize, (void*)2 },
-	{ "Enable mouse grab + emu",	XEMUGUI_MENUID_CALLABLE |
-					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_set_mouse_grab, NULL },
 	{ "Show drive LED",		XEMUGUI_MENUID_CALLABLE |
-					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_show_drive_led, NULL },
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_toggle_int, (void*)&configdb.show_drive_led },
 #ifdef XEMU_FILES_SCREENSHOT_SUPPORT
 	{ "Screenshot",			XEMUGUI_MENUID_CALLABLE,	xemugui_cb_set_integer_to_one, &register_screenshot_request },
 #endif
@@ -409,15 +468,22 @@ static const struct menu_st menu_reset[] = {
 	{ "Reset into C64 mode",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, reset_into_c64_mode        },
 	{ NULL }
 };
+static const struct menu_st menu_inputdevices[] = {
+	{ "Swap emulated joystick port",XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, input_toggle_joy_emu },
+	{ "Enable mouse grab + emu",	XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_set_mouse_grab, NULL },
+	{ "Use OSD key debugger",	XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_osd_key_debugger, NULL },
+	{ NULL }
+};
 static const struct menu_st menu_debug[] = {
 #ifdef HAS_UARTMON_SUPPORT
 	{ "Start umon on " UMON_DEFAULT_PORT,
 					XEMUGUI_MENUID_CALLABLE |
 					XEMUGUI_MENUFLAG_QUERYBACK,	ui_start_umon, NULL },
 #endif
-	{ "OSD key debugger",		XEMUGUI_MENUID_CALLABLE |
-					XEMUGUI_MENUFLAG_QUERYBACK,	xemugui_cb_osd_key_debugger, NULL },
-	{ "Dump memory info file",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_dump_memory },
+	{ "Dump main memory info file",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_dump_memory },
+	{ "Dump hyperRAM into file",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_dump_hyperram },
 	{ "Emulation state info",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, ui_emu_info },
 	{ NULL }
 };
@@ -432,13 +498,14 @@ static const struct menu_st menu_help[] = {
 };
 #endif
 static const struct menu_st menu_d81[] = {
-	{ "Attach user D81",		XEMUGUI_MENUID_CALLABLE |
-					XEMUGUI_MENUFLAG_QUERYBACK,	ui_attach_d81, NULL },
-	{ "Use internal D81",		XEMUGUI_MENUID_CALLABLE |
+	{ "Attach user D81 on drv-8",	XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_attach_d81, (void*)0 },
+	{ "Use internal D81 on drv-8",	XEMUGUI_MENUID_CALLABLE |
 					XEMUGUI_MENUFLAG_QUERYBACK,	ui_detach_d81, NULL },
+	{ "Attach user D81 on drv-9",	XEMUGUI_MENUID_CALLABLE,	ui_attach_d81, (void*)1 },
 	{ NULL }
 };
-static const struct menu_st menu_audio[] = {
+static const struct menu_st menu_audio_stereo[] = {
 	{ "Hard stereo separation",	XEMUGUI_MENUID_CALLABLE |
 					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*) 100 },
 	{ "Mono downmix 80%",		XEMUGUI_MENUID_CALLABLE |
@@ -463,8 +530,54 @@ static const struct menu_st menu_audio[] = {
 					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_mono_downmix, (void*)-100 },
 	{ NULL }
 };
+static const struct menu_st menu_audio_volume[] = {
+	{ "100%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*) 100 },
+	{ "90%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*)  90 },
+	{ "80%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*)  80 },
+	{ "70%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*)  70 },
+	{ "60%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*)  60 },
+	{ "50%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*)  50 },
+	{ "40%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*)  40 },
+	{ "30%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*)  30 },
+	{ "20%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*)  20 },
+	{ "10%",			XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_audio_volume, (void*)  10 },
+	{ NULL }
+};
+static const struct menu_st menu_audio_sids[] = {
+	{ "SID @ $D400",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_sids_enabled, (void*)1 },
+	{ "SID @ $D420",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_sids_enabled, (void*)2 },
+	{ "SID @ $D440",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_sids_enabled, (void*)4 },
+	{ "SID @ SD460",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_sids_enabled, (void*)8 },
+	{ NULL }
+};
+static const struct menu_st menu_audio[] = {
+	{ "Audio output",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_toggle_int_inverted, (void*)&configdb.nosound },
+	{ "OPL3 emulation",		XEMUGUI_MENUID_CALLABLE |
+					XEMUGUI_MENUFLAG_QUERYBACK,	ui_cb_toggle_int_inverted, (void*)&configdb.noopl3 },
+	{ "Clear audio registers",	XEMUGUI_MENUID_CALLABLE,	xemugui_cb_call_user_data, audio65_clear_regs },
+	{ "Emulated SIDs",		XEMUGUI_MENUID_SUBMENU,		NULL, menu_audio_sids   },
+	{ "Stereo separation",		XEMUGUI_MENUID_SUBMENU,		NULL, menu_audio_stereo },
+	{ "Master volume",		XEMUGUI_MENUID_SUBMENU,		NULL, menu_audio_volume },
+	{ NULL }
+};
 static const struct menu_st menu_main[] = {
 	{ "Display",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_display },
+	{ "Input devices",		XEMUGUI_MENUID_SUBMENU,		NULL, menu_inputdevices },
 	{ "Audio",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_audio   },
 	{ "SD-card",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_sdcard  },
 	{ "FD D81",			XEMUGUI_MENUID_SUBMENU,		NULL, menu_d81     },

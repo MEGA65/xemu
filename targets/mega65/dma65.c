@@ -57,6 +57,12 @@ int   dma_chip_revision_is_dynamic;	// allowed to change DMA chip revision (norm
 int   dma_chip_revision_override;
 int   dma_chip_initial_revision;
 int   rom_date = 0;
+// Hacky stuff:
+// low byte: the transparent byte value
+// bit 8: zero = transprent mode is used, 1 = no DMA transparency is in used
+// This is done this way to have a single 'if' to check both of enabled transparency and the transparent value,
+// since the value (being 8 bit) to be written would never match values > $FF
+static unsigned int dma_transparency;
 
 
 enum dma_op_types {
@@ -123,10 +129,19 @@ static struct {
 } modulo;
 
 
+// On C65, DMA cannot cross 64K boundaries, so the right mask is 0xFFFF
+// On MEGA65 it seems to be 1Mbyte, thus the mask should be 0xFFFFF
+// No idea about the list mask, which is not the normal dma read/write ops,
+// but reading the DMA listself only.
+#define MEM_LIST_MASK	0xFFFF
+#define MEM_ADDR_MASK	0xFFFFF
 
 
 #define DMA_READ_SOURCE()	(XEMU_UNLIKELY(source.is_io) ? DMA_SOURCE_IOREADER_FUNC(DMA_ADDRESSING(source)) : DMA_SOURCE_MEMREADER_FUNC(DMA_ADDRESSING(source)))
 #define DMA_READ_TARGET()	(XEMU_UNLIKELY(target.is_io) ? DMA_TARGET_IOREADER_FUNC(DMA_ADDRESSING(target)) : DMA_TARGET_MEMREADER_FUNC(DMA_ADDRESSING(target)))
+
+
+#if 0
 #define DMA_WRITE_SOURCE(data)	do { \
 					if (XEMU_UNLIKELY(source.is_io)) \
 						DMA_SOURCE_IOWRITER_FUNC(DMA_ADDRESSING(source), data); \
@@ -139,20 +154,41 @@ static struct {
 					else \
 						DMA_TARGET_MEMWRITER_FUNC(DMA_ADDRESSING(target), data); \
 				} while (0)
+#endif
+
+static XEMU_INLINE void DMA_WRITE_SOURCE ( Uint8 data )
+{
+	if (XEMU_LIKELY((unsigned int)data != dma_transparency)) {
+		if (XEMU_UNLIKELY(source.is_io))
+			DMA_SOURCE_IOWRITER_FUNC(DMA_ADDRESSING(source), data);
+		else
+			DMA_SOURCE_MEMWRITER_FUNC(DMA_ADDRESSING(source), data);
+	}
+}
+
+static XEMU_INLINE void DMA_WRITE_TARGET ( Uint8 data )
+{
+	if (XEMU_LIKELY((unsigned int)data != dma_transparency)) {
+		if (XEMU_UNLIKELY(target.is_io))
+			DMA_SOURCE_IOWRITER_FUNC(DMA_ADDRESSING(target), data);
+		else
+			DMA_SOURCE_MEMWRITER_FUNC(DMA_ADDRESSING(target), data);
+	}
+}
 
 // Unlike the functions above, DMA list read is always memory (not I/O)
 // Also the "step" is always one. So it's a bit special case ... even on M65 we don't use fixed point math here, just pure number
 // FIXME: I guess here, that reading DMA list also warps within a 64K area
 #ifndef DO_DEBUG_DMA
-#define DMA_READ_LIST_NEXT_BYTE()	DMA_LIST_READER_FUNC(((list_addr++) & 0xFFFF) | list_base)
+#define DMA_READ_LIST_NEXT_BYTE()	DMA_LIST_READER_FUNC(((list_addr++) & MEM_LIST_MASK) | list_base)
 #else
 static int dma_list_entry_pos = 0;
 
 static Uint8 DMA_READ_LIST_NEXT_BYTE ( void )
 {
-	int addr = ((list_addr++) & 0xFFFF) | list_base;
+	int addr = ((list_addr++) & MEM_LIST_MASK) | list_base;
 	Uint8 data = DMA_LIST_READER_FUNC(addr);
-	DEBUGPRINT("DMA: reading DMA (rev#%d) list from $%08X ($%02X) [#%d]: $%02X" NL, dma_chip_revision, addr, (list_addr-1) & 0xFFFF, dma_list_entry_pos++, data);
+	DEBUGPRINT("DMA: reading DMA (rev#%d) list from $%08X ($%02X) [#%d]: $%02X" NL, dma_chip_revision, addr, (list_addr-1) & MEM_LIST_MASK, dma_list_entry_pos++, data);
 	return data;
 }
 #endif
@@ -301,13 +337,11 @@ int dma_update ( void )
 				DEBUGDMA("DMA: enhanced option byte $%02X read" NL, opt);
 				cycles++;
 				switch (opt) {
-					case 0x86:	// not supported yet
-						list_addr++;	// skip the parameter too
-						cycles++;
-						// flow onto the next 'case'!!
-					case 0x06:
-					case 0x07:
-						DEBUGPRINT("DMA: enhanced DMA transparency is not supported yet (option=$%02X) @ PC=$%04X" NL, opt, cpu65.pc);
+					case 0x06:	// disable transparency
+						dma_transparency |= 0x100;
+						break;
+					case 0x07:	// enable transparency
+						dma_transparency &= 0xFF;
 						break;
 					case 0x0A:
 						dma_chip_revision_override = 0;
@@ -339,14 +373,20 @@ int dma_update ( void )
 						dma_registers[0x0B] = DMA_READ_LIST_NEXT_BYTE();
 						cycles++;
 						break;
+					case 0x86:	// byte value to be treated as "transparent" (ie: skip writing that data), if enabled
+						dma_transparency = (dma_transparency & 0x100) | (unsigned int)DMA_READ_LIST_NEXT_BYTE();
+						cycles++;
+						break;
 					case 0x00:
 						DEBUGDMA("DMA: end of enhanced options" NL);
 						break;
 					default:
 						// maybe later we should keep this quiet ...
 						DEBUGPRINT("DMA: *unknown* enhanced option: $%02X @ PC=$%04X" NL, opt, cpu65.pc);
-						if ((opt & 0x80))
+						if ((opt & 0x80)) {
 							(void)DMA_READ_LIST_NEXT_BYTE();	// skip one byte for unknown option >= $80
+							cycles++;
+						}
 						break;
 				}
 			} while (opt);
@@ -454,7 +494,7 @@ int dma_update ( void )
 			source.base	= 0;				// in case of I/O, base is not interpreted in Xemu (uses pure numbers 0-$FFF, no $DXXX, not even M65-spec mapping), and must be zero ...
 			source.addr	= (source.addr & 0xFFF) << 8;	// for M65, it is fixed-point arithmetic
 		} else {
-			source.mask	= 0xFFFF;			// warp around within 64K. I am still not sure, it happens with DMA on 64K or 1M. M65 VHDL does 64K, so I switched that too.
+			source.mask	= MEM_ADDR_MASK;		// in case of memory (not I/O) access, we have again a mask, see at "MEM_ADDR_MASK" for more explanation
 			// base selection for M65
 			// M65 has an "mbyte part" register for source (and target too)
 			// however, with F018B there are 3 bits over 1Mbyte as well, and it seems M65 (see VHDL code) add these together then. Interesting.
@@ -470,7 +510,7 @@ int dma_update ( void )
 			target.base	= 0;
 			target.addr	= (target.addr & 0xFFF) << 8;
 		} else {
-			target.mask	= 0xFFFF;
+			target.mask	= MEM_ADDR_MASK;
 			if (dma_chip_revision)
 			    target.base = (target.addr & 0x0F0000) | (((dma_registers[6] << 20) + (target.addr & 0x700000)) & 0xFF00000);
 			else
@@ -558,6 +598,7 @@ int dma_update ( void )
 			dma_registers[0x0B] = 1;	// target skip rate, integer part
 			dma_registers[5] = 0;		// set back to megabyte selection zero for source
 			dma_registers[6] = 0;		// set back to megabyte selection zero for target
+			dma_transparency = 0x100;	// no DMA transparency by default
 		}
 	}
 	in_dma_update = 0;
@@ -667,6 +708,7 @@ void dma_reset ( void )
 	dma_registers[0x09] = 1;	// fixpoint math source step integer part (1), fractional (reg#8) is already zero by memset() above
 	dma_registers[0x0B] = 1;	// fixpoint math target step integer part (1), fractional (reg#A) is already zero by memset() above
 	dma_chip_revision_override = -1;
+	dma_transparency = 0x100;	// disable transparency by default
 }
 
 

@@ -36,7 +36,8 @@ struct configdb_st configdb;
 
 
 static const struct xemutools_configdef_str_st str_options[] = {
-	{ "8",		NULL, "Path of EXTERNAL D81 disk image (not on/the SD-image)", &configdb.disk8 },
+	{ "8",		NULL, "Path of EXTERNAL D81 disk image (not on/the SD-image) on drive 8", &configdb.disk8 },
+	{ "9",		NULL, "Path of ALWAYS EXTERNAL D81 disk image on drive 9", &configdb.disk9 },
 	{ "fpga",	NULL, "Comma separated list of FPGA-board switches turned ON", &configdb.fpga },
 	{ "kickup",	NULL, "Override path of external KickStart to be used", &configdb.kickup },
 	{ "kickuplist",	NULL, "Set path of symbol list file for external KickStart", &configdb.kickuplist },
@@ -85,6 +86,8 @@ static const struct xemutools_configdef_switch_st switch_options[] = {
 	{ "syscon", "Keep system console open (Windows-specific effect only)", &configdb.syscon },
 	{ "besure", "Skip asking \"are you sure?\" on RESET or EXIT", &i_am_sure_override },
 	{ "skipunhandledmem", "Do not even ask on unhandled memory access (hides problems!!)", &configdb.skip_unhandled_mem },
+	{ "nosound", "Disables audio output generation", &configdb.nosound },
+	{ "noopl3", "Disables OPL3 emulation", &configdb.noopl3 },
 	{ NULL }
 };
 
@@ -98,8 +101,9 @@ static const struct xemutools_configdef_num_st num_options[] = {
 	{ "umon", 0, "TCP-based dual mode (http / text) monitor port number [NOT YET WORKING]", &configdb.umon, 0, 0xFFFF },
 #endif
 	{ "sdlrenderquality", RENDER_SCALE_QUALITY, "Setting SDL hint for scaling method/quality on rendering (0, 1, 2)", &configdb.sdlrenderquality, 0, 2 },
-	{ "stereoseparation", AUDIO_DEFAULT_SEPARATION, "Audio stereo separation; 100(original) ... 0(mono) ... -100(reversed-channels); default: " STRINGIFY(AUDIO_DEFAULT_SEPARATION), &configdb.stereoseparation, -100, 100 },
+	{ "stereoseparation", AUDIO_DEFAULT_SEPARATION, "Audio stereo separation; 100(hard-stereo) ... 0(mono) ... -100(hard-reversed-stereo); default: " STRINGIFY(AUDIO_DEFAULT_SEPARATION), &configdb.stereoseparation, -100, 100 },
 	{ "mastervolume", AUDIO_DEFAULT_VOLUME, "Audio emulation mixing final volume (100=unchanged ... 0=silence); default: " STRINGIFY(AUDIO_DEFAULT_VOLUME), &configdb.mastervolume, 0, 100 },
+	{ "sidmask", 15, "Enabled SIDs of the four, in form of a bitmask", &configdb.sidmask, 0, 15 },
 	{ NULL }
 };
 

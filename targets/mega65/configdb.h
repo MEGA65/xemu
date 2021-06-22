@@ -30,6 +30,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 struct configdb_st {
 	int	fullscreen_requested;
 	char	*disk8;
+	char	*disk9;
 	char	*fpga;
 	char	*kickup;
 	char	*kickuplist;
@@ -83,6 +84,9 @@ struct configdb_st {
 	int	stereoseparation;
 	int	mastervolume;
 	double	fast_mhz;
+	int	nosound;
+	int	noopl3;
+	int	sidmask;
 };
 
 extern struct configdb_st configdb;
